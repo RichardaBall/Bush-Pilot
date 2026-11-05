@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Island Bush Plane Explorer</title>
+  <style>
+    body, html {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #000;
+      font-family: sans-serif;
+    }
+    #game-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    #ui-overlay {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      color: #ffffff;
+      background: rgba(0, 0, 0, 0.6);
+      padding: 15px 20px;
+      border-radius: 8px;
+      pointer-events: none;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+    #prompt-overlay {
+      position: absolute;
+      bottom: 30px;
+      width: 100%;
+      text-align: center;
+      color: #ffff00;
+      font-size: 18px;
+      font-weight: bold;
+      text-shadow: 1px 1px 2px #000;
+      pointer-events: none;
+    }
+  </style>
+
+  <!-- Import maps polyfill -->
+  <script async src="https://unpkg.com/es-module-shims@1.6.3/dist/es-module-shims.js"></script>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <canvas id="game-canvas"></canvas>
+  
+  <div id="ui-overlay">
+    <div><strong>Controls:</strong></div>
+    <div id="controls-info">On-Foot: WASD or Arrow Keys to move. [E] Enter Aircraft when near.</div>
+    <div id="state-info">State: On-Foot</div>
+  </div>
+
+  <div id="prompt-overlay"></div>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>
