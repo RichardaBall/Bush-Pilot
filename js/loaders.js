@@ -94,9 +94,9 @@ export class AssetLoader {
 
   loadHuman() {
     return Promise.all([
-      this.loadFbx('./Idle.fbx'),
-      this.loadFbx('./Walking.fbx'),
-      this.loadFbx('./Running.fbx')
+      this.loadFbx('./models/Idle.fbx'),
+      this.loadFbx('./models/Walking.fbx'),
+      this.loadFbx('./models/Running.fbx')
     ]).then(([model, walkFile, runFile]) => {
       model.updateMatrixWorld(true);
       const box = new THREE.Box3().setFromObject(model);
