@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { Aircraft } from './aircraft.js';
 
 export class TakeoffManager {
   constructor(terrain) {
@@ -13,18 +14,19 @@ export class TakeoffManager {
     this.stage = 'TAKEOFF_ROLL';
     this.startPos.copy(aircraft.position);
     aircraft.speed = 0;
-    aircraft.pitch = -0.02;
+    aircraft.pitch = Aircraft.TAIL_DOWN_PITCH;
     aircraft.roll = 0;
+    aircraft.throttle = 0.35;
   }
 
   update(delta, aircraft, keys) {
     if (!this.active) return 'IDLE';
 
-    const turnRate = 1.2;
+    const turnRate = 0.7;
     const groundH = this.terrain.getHeightAt(aircraft.position.x, aircraft.position.z);
+    const specs = aircraft.specs;
 
     if (this.stage === 'TAKEOFF_ROLL') {
-      // On the ground: Yaw only, wings level (roll = 0)
       if (keys['ArrowLeft'] || keys['KeyA']) {
         aircraft.heading += turnRate * delta;
       }
@@ -33,44 +35,49 @@ export class TakeoffManager {
       }
       aircraft.roll = THREE.MathUtils.lerp(aircraft.roll, 0, delta * 4.0);
 
-      aircraft.speed = THREE.MathUtils.lerp(aircraft.speed, 30, delta * 1.5);
-      aircraft.position.y = groundH + 0.2;
-      aircraft.pitch = THREE.MathUtils.lerp(aircraft.pitch, -0.02, delta * 3.0);
+      aircraft.throttle = THREE.MathUtils.lerp(aircraft.throttle, 1, delta * 1.5);
+      const ground = this.terrain.groundRoll(aircraft.position.x, aircraft.position.z);
+      const gain = 0.32 * ground.accel * aircraft.powerFactor() / aircraft.loadFactor();
+      aircraft.speed = THREE.MathUtils.lerp(aircraft.speed, specs.liftoff + 2, delta * gain);
+
+      const tailUp = THREE.MathUtils.clamp(
+        (aircraft.speed - specs.tailUp) / (specs.tailLevel - specs.tailUp),
+        0,
+        1
+      );
+      const targetPitch = THREE.MathUtils.lerp(Aircraft.TAIL_DOWN_PITCH, 0, tailUp);
+      aircraft.pitch = THREE.MathUtils.lerp(aircraft.pitch, targetPitch, delta * 4.0);
+      aircraft.position.y = groundH + aircraft.groundOffset(aircraft.pitch);
 
       aircraft.moveForward(delta);
       aircraft.applyTransformations(delta);
 
-      const currentXZ = new THREE.Vector3(aircraft.position.x, 0, aircraft.position.z);
-      const startXZ = new THREE.Vector3(this.startPos.x, 0, this.startPos.z);
-      const distTraveled = currentXZ.distanceTo(startXZ);
-
-      if (distTraveled >= 35 || aircraft.speed >= 25) {
+      if (aircraft.speed >= specs.liftoff && tailUp > 0.9) {
         this.stage = 'TAKEOFF_CLIMB';
       }
     } else if (this.stage === 'TAKEOFF_CLIMB') {
-      // In the air: Bank (roll) when turning
       const maxRoll = 0.4;
       if (keys['ArrowLeft'] || keys['KeyA']) {
         aircraft.heading += turnRate * delta;
-        aircraft.roll = THREE.MathUtils.lerp(aircraft.roll, -maxRoll, delta * 4.0);
+        aircraft.roll = THREE.MathUtils.lerp(aircraft.roll, -maxRoll, delta * 2.5);
       } else if (keys['ArrowRight'] || keys['KeyD']) {
         aircraft.heading -= turnRate * delta;
-        aircraft.roll = THREE.MathUtils.lerp(aircraft.roll, maxRoll, delta * 4.0);
+        aircraft.roll = THREE.MathUtils.lerp(aircraft.roll, maxRoll, delta * 2.5);
       } else {
-        aircraft.roll = THREE.MathUtils.lerp(aircraft.roll, 0, delta * 4.0);
+        aircraft.roll = THREE.MathUtils.lerp(aircraft.roll, 0, delta * 2.5);
       }
 
-      aircraft.speed = THREE.MathUtils.lerp(aircraft.speed, 32, delta * 1.5);
-      aircraft.pitch = THREE.MathUtils.lerp(aircraft.pitch, 0.18, delta * 3.0);
-      aircraft.position.y += delta * 8;
+      aircraft.throttle = 1;
+      aircraft.speed = THREE.MathUtils.lerp(aircraft.speed, specs.climb, delta * 0.6);
+      aircraft.pitch = THREE.MathUtils.lerp(aircraft.pitch, Aircraft.CLIMB_PITCH, delta * 2.2);
+      aircraft.position.y += (specs.climbRate * 1.8 * aircraft.powerFactor() / aircraft.loadFactor()) * delta;
 
       aircraft.moveForward(delta);
       aircraft.applyTransformations(delta);
 
-      if (aircraft.position.y >= groundH + 25) {
+      if (aircraft.position.y >= groundH + 40) {
         this.active = false;
         this.stage = 'IDLE';
-        aircraft.pitch = 0.05;
         return 'CRUISE';
       }
     }

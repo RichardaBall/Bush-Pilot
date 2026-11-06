@@ -1,9 +1,23 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 
 export class AssetLoader {
   constructor() {
     this.loader = new GLTFLoader();
+    const draco = new DRACOLoader();
+    draco.setDecoderPath('https://unpkg.com/three@0.160.0/examples/jsm/libs/draco/gltf/');
+    this.loader.setDRACOLoader(draco);
+  }
+
+  loadPack(url) {
+    return new Promise((resolve) => {
+      this.loader.load(url, (gltf) => resolve(gltf.scene), undefined, () => resolve(null));
+    });
+  }
+
+  loadNaturePack() {
+    return this.loadPack('./naturePack.glb');
   }
 
   loadPiperModel() {
@@ -21,6 +35,12 @@ export class AssetLoader {
             gltf.scene.add(prop);
           }
           gltf.scene.userData.propeller = prop;
+          gltf.scene.traverse((child) => {
+            if (child.isMesh) {
+              child.castShadow = true;
+              child.receiveShadow = false;
+            }
+          });
           resolve(gltf.scene);
         },
         undefined,

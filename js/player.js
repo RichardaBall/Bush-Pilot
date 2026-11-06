@@ -30,7 +30,7 @@ export class Player {
 
     if (moveDir.lengthSq() > 0) {
       moveDir.normalize();
-      this.position.addScaledVector(moveDir, this.speed * delta);
+      this.position.addScaledVector(moveDir, this.speed * (this.pace || 1) * delta);
       
       const groundH = this.terrain.getHeightAt(this.position.x, this.position.z);
       this.position.y = groundH;

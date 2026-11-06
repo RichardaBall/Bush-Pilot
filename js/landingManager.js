@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { Aircraft } from './aircraft.js';
 
 export class LandingManager {
   constructor(terrain) {
@@ -15,45 +16,29 @@ export class LandingManager {
   update(delta, aircraft, keys) {
     if (!this.active) return 'IDLE';
 
-    const turnRate = 1.2;
+    const turnRate = 0.65;
+    const specs = aircraft.specs;
 
     if (this.stage === 'LAND_GLIDE') {
-      // In the air: Bank (roll) when turning
-      const maxRoll = 0.4;
-      if (keys['ArrowLeft'] || keys['KeyA']) {
-        aircraft.heading += turnRate * delta;
-        aircraft.roll = THREE.MathUtils.lerp(aircraft.roll, -maxRoll, delta * 4.0);
-      } else if (keys['ArrowRight'] || keys['KeyD']) {
-        aircraft.heading -= turnRate * delta;
-        aircraft.roll = THREE.MathUtils.lerp(aircraft.roll, maxRoll, delta * 4.0);
-      } else {
-        aircraft.roll = THREE.MathUtils.lerp(aircraft.roll, 0, delta * 4.0);
-      }
-
-      aircraft.speed = THREE.MathUtils.lerp(aircraft.speed, 16, delta * 1.5);
-      aircraft.moveForward(delta);
+      aircraft.updateManualFlight(delta, keys);
 
       const groundH = this.terrain.getHeightAt(aircraft.position.x, aircraft.position.z);
-      const descendingTo = aircraft.position.y - delta * 6;
-      if (descendingTo <= groundH + 0.35) {
+      const wheels = groundH + aircraft.groundOffset(aircraft.pitch);
+      const settling = keys['ArrowDown'] && !keys['ArrowUp'] && !keys['KeyW'];
+      if (settling && aircraft.position.y <= wheels + 0.35) {
         if (!this.terrain.isLandable(aircraft.position.x, aircraft.position.z)) {
           this.active = false;
           this.stage = 'IDLE';
-          aircraft.pitch = THREE.MathUtils.lerp(aircraft.pitch, 0, delta * 3.0);
+          aircraft.pitch = THREE.MathUtils.lerp(aircraft.pitch, Aircraft.CRUISE_PITCH, delta * 2.0);
           aircraft.applyTransformations(delta);
           return 'CRUISE';
         }
-        aircraft.position.y = groundH + 0.2;
-        aircraft.pitch = THREE.MathUtils.lerp(aircraft.pitch, 0.03, delta * 3.0);
+        aircraft.pitch = 0;
+        aircraft.position.y = groundH + aircraft.groundOffset(0);
         aircraft.applyTransformations(delta);
         this.stage = 'LAND_ROLLOUT';
-      } else {
-        aircraft.position.y = descendingTo;
-        aircraft.pitch = THREE.MathUtils.lerp(aircraft.pitch, -0.06, delta * 3.0);
-        aircraft.applyTransformations(delta);
       }
     } else if (this.stage === 'LAND_ROLLOUT') {
-      // On the ground: Yaw only, wings level (roll = 0)
       if (keys['ArrowLeft'] || keys['KeyA']) {
         aircraft.heading += turnRate * delta;
       }
@@ -62,19 +47,27 @@ export class LandingManager {
       }
       aircraft.roll = THREE.MathUtils.lerp(aircraft.roll, 0, delta * 4.0);
 
-      aircraft.speed = THREE.MathUtils.lerp(aircraft.speed, 0, delta * 2.0);
-      aircraft.pitch = THREE.MathUtils.lerp(aircraft.pitch, 0.03, delta * 3.0);
+      aircraft.throttle = THREE.MathUtils.lerp(aircraft.throttle, 0.15, delta * 1.5);
+      const ground = this.terrain.groundRoll(aircraft.position.x, aircraft.position.z);
+      const bite = ground.soft && aircraft.speed > 9 ? 0.65 : 1;
+      aircraft.speed = Math.max(0, aircraft.speed - specs.brake * ground.brake * bite * delta);
+
+      const settled = THREE.MathUtils.clamp(1 - aircraft.speed / specs.tailUp, 0, 1);
+      let targetPitch = THREE.MathUtils.lerp(0, Aircraft.TAIL_DOWN_PITCH, settled);
+      if (ground.soft && aircraft.speed > 8) targetPitch = 0.16;
+      aircraft.pitch = THREE.MathUtils.lerp(aircraft.pitch, targetPitch, delta * 3.0);
       aircraft.moveForward(delta);
 
       const groundH = this.terrain.getHeightAt(aircraft.position.x, aircraft.position.z);
-      aircraft.position.y = groundH + 0.2;
+      aircraft.position.y = groundH + aircraft.groundOffset(aircraft.pitch);
       aircraft.applyTransformations(delta);
 
-      if (aircraft.speed < 0.2) {
+      if (aircraft.speed < 0.3) {
         aircraft.speed = 0;
-        aircraft.pitch = 0;
+        aircraft.pitch = Aircraft.TAIL_DOWN_PITCH;
         aircraft.roll = 0;
-        aircraft.position.y = groundH + 0.2;
+        aircraft.throttle = 0.15;
+        aircraft.position.y = groundH + aircraft.groundOffset(aircraft.pitch);
         aircraft.applyTransformations(delta);
 
         this.active = false;
