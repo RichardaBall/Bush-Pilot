@@ -65,8 +65,10 @@ export class Aircraft {
     this.cargo = 0;
     this.charge = 82;
 
-    const ground = terrain.getHeightAt(0, 150);
-    this.position = new THREE.Vector3(0, ground + this.groundOffset(this.pitch), 150);
+    const park = terrain.beachPark();
+    this.heading = park.heading;
+    const ground = terrain.getHeightAt(park.x, park.z);
+    this.position = new THREE.Vector3(park.x, ground + this.groundOffset(this.pitch), park.z);
 
     this.propeller = this.mesh.userData.propeller || null;
 
@@ -92,7 +94,7 @@ export class Aircraft {
   // that power. Nothing raises the nose to clear trees or ridges.
   updatePoweredFlight(delta, keys, blocked) {
     const up = keys['ArrowUp'] || keys['KeyW'];
-    const down = keys['ArrowDown'] || (!this.airborne && keys['KeyS']);
+    const down = keys['ArrowDown'] || keys['KeyS'];
     if (!(blocked && up)) {
       const command = (up ? 1 : 0) - (down ? 1 : 0);
       this.power = THREE.MathUtils.clamp(this.power + command * 0.28 * delta, 0, 1);

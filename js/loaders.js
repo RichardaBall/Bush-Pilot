@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 
 export class AssetLoader {
   constructor() {
@@ -8,6 +9,13 @@ export class AssetLoader {
     const draco = new DRACOLoader();
     draco.setDecoderPath('https://unpkg.com/three@0.160.0/examples/jsm/libs/draco/gltf/');
     this.loader.setDRACOLoader(draco);
+    this.fbx = new FBXLoader();
+  }
+
+  loadFbx(url) {
+    return new Promise((resolve, reject) => {
+      this.fbx.load(url, resolve, undefined, reject);
+    });
   }
 
   loadPack(url) {
@@ -17,13 +25,13 @@ export class AssetLoader {
   }
 
   loadNaturePack() {
-    return this.loadPack('./naturePack.glb');
+    return this.loadPack('./models/tropicalPack.glb');
   }
 
   loadPiperModel() {
     return new Promise((resolve) => {
       this.loader.load(
-        './piper.glb',
+        './models/piper.glb',
         (gltf) => {
           // Look for an existing propeller in the GLTF model or add one at the nose
           let prop = gltf.scene.getObjectByName('Propeller') || gltf.scene.getObjectByName('prop');
@@ -81,6 +89,67 @@ export class AssetLoader {
           resolve(planeGroup);
         }
       );
+    });
+  }
+
+  loadHuman() {
+    return Promise.all([
+      this.loadFbx('./Idle.fbx'),
+      this.loadFbx('./Walking.fbx'),
+      this.loadFbx('./Running.fbx')
+    ]).then(([model, walkFile, runFile]) => {
+      model.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(model);
+      const height = Math.max(0.001, box.max.y - box.min.y);
+      model.scale.setScalar(1.8 / height);
+
+      const prepare = (clip, name) => {
+        const track = clip.tracks.find((t) => t.name === 'mixamorigHips.position');
+        if (track) {
+          const values = track.values;
+          const x = values[0];
+          const z = values[2];
+          for (let i = 0; i < values.length; i += 3) {
+            values[i] = x;
+            values[i + 2] = z;
+          }
+        }
+        clip.name = name;
+        return clip;
+      };
+
+      model.animations = [
+        prepare(model.animations[0], 'idle'),
+        prepare(walkFile.animations[0], 'walk'),
+        prepare(runFile.animations[0], 'run')
+      ];
+
+      model.traverse((child) => {
+        if (!child.isMesh) return;
+        child.castShadow = true;
+        child.receiveShadow = true;
+        child.frustumCulled = false;
+        const source = Array.isArray(child.material) ? child.material : [child.material];
+        const next = source.map((mat) => {
+          if (!mat) return mat;
+          const standard = new THREE.MeshStandardMaterial({
+            map: mat.map || null,
+            color: mat.color ? mat.color.clone() : new THREE.Color(0xffffff),
+            roughness: 0.72,
+            metalness: 0,
+            normalMap: mat.normalMap || null,
+            transparent: !!mat.transparent,
+            opacity: mat.opacity === undefined ? 1 : mat.opacity,
+            alphaTest: mat.alphaTest || (mat.transparent ? 0.4 : 0),
+            side: mat.side
+          });
+          if (standard.map) standard.map.colorSpace = THREE.SRGBColorSpace;
+          return standard;
+        });
+        child.material = Array.isArray(child.material) ? next : next[0];
+      });
+
+      return model;
     });
   }
 

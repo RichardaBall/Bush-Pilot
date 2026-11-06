@@ -28,9 +28,12 @@ export class FieldKit {
 
   waterNearby(position) {
     const s = this.terrain.getSurfaceAt(position.x, position.z);
-    if (s.kind === 'lake' || s.kind === 'river') return true;
+    if (s.kind === 'ocean' || s.kind === 'lake' || s.kind === 'river') return true;
+    if (s.kind === 'sand' && s.shoreDist < 18) return true;
     if (s.riverDist < 14 && s.height < 12) return true;
-    return this.terrain.lakeEllipse(position.x, position.z) < 1.3 && s.height < this.terrain.lake.level + 2;
+    const lake = this.terrain.lake;
+    if (!lake) return false;
+    return this.terrain.lakeEllipse(position.x, position.z) < 1.3 && s.height < lake.level + 2;
   }
 
   chargeRate() {

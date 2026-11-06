@@ -1,6 +1,19 @@
 import * as THREE from 'three';
 
 const LIFE = 14;
+const PRINT_LIFE = 16;
+
+function makeSoleGeometry() {
+  const shape = new THREE.Shape();
+  shape.moveTo(0, -0.15);
+  shape.bezierCurveTo(0.06, -0.14, 0.075, -0.02, 0.055, 0.05);
+  shape.bezierCurveTo(0.04, 0.12, 0.015, 0.145, 0, 0.145);
+  shape.bezierCurveTo(-0.015, 0.145, -0.04, 0.12, -0.055, 0.05);
+  shape.bezierCurveTo(-0.075, -0.02, -0.06, -0.14, 0, -0.15);
+  const geometry = new THREE.ShapeGeometry(shape, 8);
+  geometry.rotateX(-Math.PI / 2);
+  return geometry;
+}
 
 function gearPoint(aircraft, localX, localZ) {
   const heading = aircraft.heading;
@@ -32,10 +45,15 @@ export class GroundFx {
     this.scene = scene;
     this.terrain = terrain;
     this.marks = [];
+    this.prints = [];
     this.puffs = [];
     this.sincePuff = 0;
     this.lastGear = [null, null, null];
     this.puffGeo = new THREE.PlaneGeometry(0.7, 0.7);
+    this.soleGeo = makeSoleGeometry();
+    this.stepCarry = 0;
+    this.lastStep = null;
+    this.footSide = 1;
   }
 
   surfaceTint(kind) {
@@ -105,6 +123,72 @@ export class GroundFx {
     }
   }
 
+  stampFoot(player, side) {
+    const yaw = player.mesh.rotation.y;
+    const sin = Math.sin(yaw);
+    const cos = Math.cos(yaw);
+    const lateral = 0.11 * side;
+    const x = player.position.x + cos * lateral - sin * 0.06;
+    const z = player.position.z - sin * lateral - cos * 0.06;
+    const surface = this.terrain.getSurfaceAt(x, z);
+    if (surface.kind === 'ocean' || surface.kind === 'river' || surface.kind === 'lake') return;
+    const tint = this.surfaceTint(surface.kind);
+    const material = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(tint[0] * 0.32, tint[1] * 0.3, tint[2] * 0.26),
+      transparent: true,
+      opacity: 0.82,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -3,
+      polygonOffsetUnits: -3
+    });
+    const print = new THREE.Mesh(this.soleGeo, material);
+    print.position.set(x, surface.height + 0.06, z);
+    print.rotation.y = yaw;
+    print.renderOrder = 2;
+    print.userData.life = PRINT_LIFE;
+    this.scene.add(print);
+    this.prints.push(print);
+    if (this.prints.length > 180) {
+      const old = this.prints.shift();
+      this.scene.remove(old);
+      old.material.dispose();
+    }
+  }
+
+  updateFeet(player, moving, running) {
+    if (!player || !moving || !player.active) {
+      this.stepCarry = 0;
+      this.lastStep = null;
+      return;
+    }
+    const p = player.position;
+    const surface = this.terrain.getSurfaceAt(p.x, p.z);
+    if (surface.kind === 'ocean' || surface.kind === 'river' || surface.kind === 'lake') {
+      this.stepCarry = 0;
+      this.lastStep = null;
+      return;
+    }
+    if (!this.lastStep) {
+      this.lastStep = { x: p.x, z: p.z };
+      return;
+    }
+    const len = Math.hypot(p.x - this.lastStep.x, p.z - this.lastStep.z);
+    this.lastStep.x = p.x;
+    this.lastStep.z = p.z;
+    if (len > 2) {
+      this.stepCarry = 0;
+      return;
+    }
+    this.stepCarry += len;
+    const stride = running ? 1.15 : 0.78;
+    if (this.stepCarry < stride) return;
+    this.stepCarry -= stride;
+    this.stampFoot(player, this.footSide);
+    this.footSide *= -1;
+  }
+
   spawnPuff(x, z, y, tint, rising) {
     const material = new THREE.MeshBasicMaterial({
       color: new THREE.Color(tint[0], tint[1], tint[2]),
@@ -156,6 +240,17 @@ export class GroundFx {
           tint,
           wet
         );
+      }
+    }
+
+    for (let i = this.prints.length - 1; i >= 0; i--) {
+      const print = this.prints[i];
+      print.userData.life -= delta;
+      print.material.opacity = Math.max(0, print.userData.life / PRINT_LIFE) * 0.82;
+      if (print.userData.life <= 0) {
+        this.scene.remove(print);
+        print.material.dispose();
+        this.prints.splice(i, 1);
       }
     }
 

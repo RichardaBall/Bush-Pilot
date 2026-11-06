@@ -6,7 +6,6 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { AssetLoader } from './loaders.js';
 import { Terrain } from './terrain.js';
-import { Airport } from './airport.js';
 import { Player } from './player.js';
 import { Aircraft } from './aircraft.js';
 import { FieldKit } from './fieldkit.js';
@@ -25,7 +24,9 @@ class Game {
     this.keys = {};
     this.keyJustPressed = {};
     this.landingHint = 0;
-    this.chaseView = false;
+    this.planeLookYaw = 0;
+    this.planeLookPitch = 0;
+    this.planeLookIdle = 0;
 
     this.sunOffset = new THREE.Vector3(210, 120, 60);
     this.initScene();
@@ -41,8 +42,8 @@ class Game {
 
   initScene() {
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0xd4e8f6);
-    this.scene.fog = new THREE.FogExp2(0xd4e8f6, 0.00034);
+    this.scene.background = new THREE.Color(0xb7dce6);
+    this.scene.fog = new THREE.FogExp2(0xb7dce6, 0.0011);
 
     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
     this.renderer.setSize(window.innerWidth, window.innerHeight);
@@ -64,7 +65,7 @@ class Game {
   }
 
   initLights() {
-    const hemi = new THREE.HemisphereLight(0xcfe7ff, 0x6d8f45, 0.55);
+    const hemi = new THREE.HemisphereLight(0xc5e4ee, 0x4a5340, 0.55);
     this.scene.add(hemi);
 
     const ambientLight = new THREE.AmbientLight(0xfff1dd, 0.18);
@@ -209,28 +210,57 @@ class Game {
       this.keys[e.code] = false;
       this.keyJustPressed[e.code] = false;
     });
+
+    this.walkZoom = 0;
+    this.canvas.addEventListener('click', () => {
+      this.canvas.requestPointerLock();
+    });
+    this.canvas.addEventListener('wheel', (e) => {
+      if (this.mode !== 'ON_FOOT') return;
+      e.preventDefault();
+      const step = Math.sign(e.deltaY) * 0.1;
+      this.walkZoom = Math.min(1, Math.max(0, this.walkZoom - step));
+    }, { passive: false });
+    window.addEventListener('mousemove', (e) => {
+      if (document.pointerLockElement !== this.canvas) return;
+      if (this.mode === 'ON_FOOT' && this.player) {
+        this.player.look(e.movementX);
+        this.player.lookUp(e.movementY);
+      } else if (this.mode === 'IN_AIRCRAFT') {
+        this.planeLookYaw -= e.movementX * 0.0022;
+        this.planeLookPitch = THREE.MathUtils.clamp(this.planeLookPitch + e.movementY * 0.0018, -0.5, 0.7);
+        this.planeLookIdle = 0;
+      }
+    });
   }
 
   async boot() {
     this.terrain = new Terrain(this.scene);
-    this.airport = new Airport(this.scene, this.terrain);
     const loader = new AssetLoader();
     const [piperMesh, natureScene, grassScene, cliffScene, stoneScene, cloudScene] = await Promise.all([
       loader.loadPiperModel(),
-      loader.loadPack('./naturePack.glb'),
-      loader.loadPack('./grassPack.glb'),
-      loader.loadPack('./cliffPack.glb'),
-      loader.loadPack('./stonePack.glb'),
-      loader.loadPack('./cloudPack.glb')
+      loader.loadPack('./models/tropicalPack.glb'),
+      loader.loadPack('./models/grassPack.glb'),
+      loader.loadPack('./models/cliffPack.glb'),
+      loader.loadPack('./models/stonePack.glb'),
+      loader.loadPack('./models/cloudPack.glb')
     ]);
     const packs = { grass: grassScene, cliff: cliffScene, stone: stoneScene };
     if (natureScene) this.terrain.scatterNature(natureScene, packs);
     else this.terrain.initProps();
     this.terrain.scatterClouds(cloudScene);
-    const humanMesh = loader.createHumanAvatar();
+    const humanMesh = await loader.loadHuman().catch(() => loader.createHumanAvatar());
 
     this.player = new Player(this.scene, this.terrain, humanMesh);
     this.aircraft = new Aircraft(this.scene, this.terrain, piperMesh);
+    const camTarget = this.player.position;
+    const yaw = this.player.mesh.rotation.y;
+    this.camera.position.set(
+      camTarget.x - Math.sin(yaw) * 20,
+      camTarget.y + 24,
+      camTarget.z - Math.cos(yaw) * 20
+    );
+    this.camera.lookAt(camTarget.x, camTarget.y + 0.8, camTarget.z);
     this.field = new FieldKit(this.scene, this.terrain, this.aircraft);
     this.groundFx = new GroundFx(this.scene, this.terrain);
     this.groundShadow = this.createGroundShadow();
@@ -278,37 +308,60 @@ class Game {
   updateCamera(delta) {
     const inPlane = this.mode === 'IN_AIRCRAFT';
     const targetPos = inPlane ? this.aircraft.position : this.player.position;
-    let desiredCamPos;
-    let lookAt = targetPos;
 
-    if (inPlane && this.chaseView) {
-      const heading = this.aircraft.heading;
-      const back = 26;
-      desiredCamPos = new THREE.Vector3(
-        targetPos.x - Math.sin(heading) * back,
-        targetPos.y + 18,
-        targetPos.z - Math.cos(heading) * back
+    if (inPlane) {
+      this.planeLookIdle += delta;
+      if (this.planeLookIdle > 0.45) {
+        const settle = 1 - Math.exp(-1.6 * delta);
+        this.planeLookYaw = THREE.MathUtils.lerp(this.planeLookYaw, 0, settle);
+        this.planeLookPitch = THREE.MathUtils.lerp(this.planeLookPitch, 0, settle);
+      }
+      const yaw = this.aircraft.heading + this.planeLookYaw;
+      const orbit = THREE.MathUtils.clamp(0.6 + this.planeLookPitch, 0.1, 1.2);
+      const dist = 30;
+      const horiz = Math.cos(orbit) * dist;
+      const height = Math.sin(orbit) * dist;
+      this.camera.position.set(
+        targetPos.x - Math.sin(yaw) * horiz,
+        targetPos.y + height,
+        targetPos.z - Math.cos(yaw) * horiz
       );
-      const ahead = 48;
-      lookAt = new THREE.Vector3(
-        targetPos.x + Math.sin(heading) * ahead,
+      this.camera.lookAt(
+        targetPos.x + Math.sin(yaw) * 12,
         targetPos.y + 2,
-        targetPos.z + Math.cos(heading) * ahead
+        targetPos.z + Math.cos(yaw) * 12
       );
-    } else {
-      const targetD = inPlane ? 35 : 14;
-      if (this.currentD === undefined) this.currentD = targetD;
-      this.currentD = THREE.MathUtils.lerp(this.currentD, targetD, 0.05);
-
-      const offset = inPlane
-        ? new THREE.Vector3(0, 22, 35)
-        : new THREE.Vector3(0, 12, 16);
-      desiredCamPos = targetPos.clone().add(offset);
+      return;
     }
 
-    const follow = 1 - Math.exp(-8 * Math.max(0.001, delta));
-    this.camera.position.lerp(desiredCamPos, this.chaseView && inPlane ? Math.min(1, follow * 1.4) : follow);
-    this.camera.lookAt(lookAt);
+    const yaw = this.player.mesh.rotation.y;
+    const zoom = this.walkZoom || 0;
+    const back = 20 + (0.28 - 20) * zoom;
+    const height = 24 + (1.62 - 24) * zoom;
+    const ahead = 6 + (12 - 6) * zoom;
+    const lookH = 0.6 + (1.55 - 0.6) * zoom;
+    const pitchBlend = THREE.MathUtils.smoothstep(zoom, 0.45, 0.85);
+    const pitch = (this.player.lookPitch || 0) * pitchBlend;
+    this.camera.position.set(
+      targetPos.x - Math.sin(yaw) * back,
+      targetPos.y + height,
+      targetPos.z - Math.cos(yaw) * back
+    );
+    const look = new THREE.Vector3(
+      targetPos.x + Math.sin(yaw) * ahead,
+      targetPos.y + lookH,
+      targetPos.z + Math.cos(yaw) * ahead
+    );
+    if (pitchBlend > 0) {
+      const pitched = this.camera.position.clone().add(new THREE.Vector3(
+        Math.sin(yaw) * Math.cos(pitch),
+        -Math.sin(pitch),
+        Math.cos(yaw) * Math.cos(pitch)
+      ).multiplyScalar(12));
+      look.lerp(pitched, pitchBlend);
+    }
+    this.camera.lookAt(look);
+    if (this.player.active) this.player.mesh.visible = zoom < 0.72;
   }
 
   handleStateTransitions() {
@@ -322,6 +375,9 @@ class Game {
         this.uiPrompt.innerText = 'Press [E] to Enter Aircraft';
         if (this.keyJustPressed['KeyE']) {
           this.mode = 'IN_AIRCRAFT';
+          this.planeLookYaw = 0;
+          this.planeLookPitch = 0;
+          this.planeLookIdle = 1;
           this.player.setActive(false);
           this.aircraft.airborne = false;
           this.uiPrompt.innerText = '';
@@ -338,14 +394,10 @@ class Game {
       if (atWater && this.keyJustPressed['KeyF']) this.field.collectWater();
       if (nearPlane && this.keyJustPressed['KeyG']) this.field.togglePanel();
     } else if (this.mode === 'IN_AIRCRAFT') {
-      if (this.aircraftState !== 'PARKED' && this.keyJustPressed['KeyS']) {
-        this.chaseView = !this.chaseView;
-      }
-
       if (this.aircraftState === 'PARKED') {
         this.uiPrompt.innerText = this.field.panelOut
           ? 'Stow the solar panel [G] before adding power'
-          : 'Hold [UP] to add power and take off. [DOWN] reduces power. [E] Exit';
+          : 'Hold [W] to add power and take off. [S] reduces power. [E] Exit';
         if (this.keyJustPressed['KeyG'] && this.field.panelOut) this.field.togglePanel();
         if (this.keyJustPressed['KeyE']) {
           this.mode = 'ON_FOOT';
@@ -356,17 +408,16 @@ class Game {
       } else {
         this.uiPrompt.innerText = this.landingHint > 0
           ? 'Too steep or wet. Add power and find gentler ground.'
-          : 'Up climbs. Down descends. Cruise power holds this height. The climb stops at the ceiling.';
+          : 'W climbs. S descends. Cruise power holds this height. The climb stops at the ceiling.';
       }
     }
 
     const charge = Math.round(this.aircraft.charge);
     const load = Math.round(this.aircraft.cargo);
     this.uiState.innerText = `State: ${this.mode} | Aircraft: ${this.aircraftState} | Charge ${charge}% | Load ${load} kg`;
-    const chase = this.chaseView ? 'Chase view on' : 'S = Chase view';
     this.uiControls.innerText = this.mode === 'ON_FOOT'
-      ? 'On-Foot: WASD / Arrows. [E] Aircraft  [F] Water  [G] Solar panel'
-      : `Up adds power. Down reduces it. Left and right turn. ${chase}`;
+      ? 'Click to look. Mouse looks. Scroll zooms. W forward, S back, A/D strafe, Shift runs. [E] Aircraft  [F] Water  [G] Panel'
+      : 'Click to look. Mouse looks. W adds power, S reduces it, A/D turn. [E] Exit';
     const kit = this.field;
     this.uiMeters.innerHTML = this.mode === 'ON_FOOT'
       ? `<b>Hunger</b> ${Math.round(kit.hunger)}<br><b>Thirst</b> ${Math.round(kit.thirst)}<br><b>Stamina</b> ${Math.round(kit.stamina)}<br><b>Water cans</b> ${kit.cans}`
@@ -390,6 +441,10 @@ class Game {
       }
     }
     this.player.update(delta, this.keys);
+    if (this.groundFx && this.player) {
+      const running = this.keys['ShiftLeft'] || this.keys['ShiftRight'];
+      this.groundFx.updateFeet(this.player, onFoot && moving, running);
+    }
     if (this.groundFx && this.aircraft) {
       const groundY = this.terrain.getHeightAt(this.aircraft.position.x, this.aircraft.position.z);
       const rolling = this.mode === 'IN_AIRCRAFT' && this.aircraft.position.y - groundY < 1.6;
@@ -405,7 +460,8 @@ class Game {
     if (this.landingHint > 0) this.landingHint -= delta;
     this.updateGroundShadow();
     const focus = this.mode === 'ON_FOOT' ? this.player.position : this.aircraft.position;
-    this.terrain.update(delta, focus.x, focus.z);
+    const wide = this.mode === 'ON_FOOT' && (this.walkZoom || 0) === 0;
+    this.terrain.update(delta, focus.x, focus.z, focus.y + 1.1, wide);
     this.updateShadowFocus();
 
     this.handleStateTransitions();

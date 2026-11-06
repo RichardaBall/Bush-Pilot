@@ -218,6 +218,41 @@ float terrainNoise(vec2 p) {
 }
 `;
 
+const foliageFocus = new THREE.Vector3();
+const foliageReveal = { value: 0 };
+
+function fadeNearCamera(material) {
+  material.customProgramCacheKey = () => 'bush-foliage-clear';
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.foliageFocus = { value: foliageFocus };
+    shader.uniforms.foliageReveal = foliageReveal;
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vFoliageWorld;')
+      .replace('#include <project_vertex>', `#include <project_vertex>
+#ifdef USE_INSTANCING
+        vFoliageWorld = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;
+#else
+        vFoliageWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;
+#endif`);
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+varying vec3 vFoliageWorld;
+uniform vec3 foliageFocus;
+uniform float foliageReveal;`)
+      .replace('#include <color_fragment>', `#include <color_fragment>
+        if (foliageReveal > 0.5 && vFoliageWorld.y > foliageFocus.y + 2.9) {
+          vec3 toCam = vFoliageWorld - cameraPosition;
+          if (dot(toCam, toCam) < 100.0) discard;
+          vec3 toPlayer = foliageFocus - cameraPosition;
+          float span = max(dot(toPlayer, toPlayer), 0.001);
+          float along = clamp(dot(toCam, toPlayer) / span, 0.0, 1.0);
+          vec3 closest = cameraPosition + toPlayer * along;
+          float sightRadius = mix(18.0, 8.0, along);
+          if (distance(vFoliageWorld, closest) < sightRadius) discard;
+        }`);
+  };
+}
+
 function createTerrainMaterial() {
   const material = new THREE.MeshStandardMaterial({
     vertexColors: true,
@@ -240,7 +275,7 @@ function createTerrainMaterial() {
         float slope = 1.0 - clamp(vTerrainNormal.y, 0.0, 1.0);
         vec3 col = diffuseColor.rgb;
         col *= 0.9 + 0.16 * grain;
-        col = mix(col, col * vec3(0.86, 0.94, 0.78), smoothstep(0.46, 0.78, mid) * (1.0 - slope) * 0.55);
+        col = mix(col, col * vec3(0.9, 0.96, 0.88), smoothstep(0.46, 0.78, mid) * (1.0 - slope) * 0.2);
         float crevice = smoothstep(0.22, 0.82, slope) * (0.35 + 0.65 * mid);
         col *= mix(1.0, 0.52, crevice);
         float wet = smoothstep(1.35, 0.08, vTerrainWorld.y) * (1.0 - smoothstep(0.35, 0.75, slope));
@@ -259,53 +294,24 @@ function createTerrainMaterial() {
 export class Terrain {
   constructor(scene) {
     this.scene = scene;
-    this.size = 7200;
-    this.segments = 800;
+    this.size = 900;
+    this.segments = 300;
     this.step = this.size / this.segments;
     this.oceanTime = 0;
     this.canopy = [];
     this._info = {};
     this._color = [0, 0, 0];
-
-    // inner is the fraction of the ellipse that stays perfectly flat.
-    // The runway is 24 x 120, so the flat core must cover x=±12 and z=90..210.
-    this.clearings = [
-      { x: 0, z: 150, rx: 52, rz: 150, rot: 0, h: null, inner: 0.26 }
-    ];
-
-    this.rivers = [
-      buildRiver([
-        [-920, -380],
-        [-480, 120],
-        [40, 560],
-        [520, 980],
-        [980, 1240],
-        [1460, 1120],
-        [1780, 1540],
-        [2140, 1880],
-        [2520, 1760],
-        [2860, 2140]
-      ]),
-      buildRiver([
-        [-1000, -820],
-        [-780, -1240],
-        [-360, -1480],
-        [80, -1760],
-        [520, -1620],
-        [860, -2040],
-        [1280, -1880],
-        [1560, -2300],
-        [1960, -2480],
-        [2320, -2860]
-      ])
+    this.clearings = [];
+    this.rivers = [];
+    // Southeast spit: x east, z south. Width is the half-width in meters.
+    this.spit = [
+      [108, 112, 30],
+      [136, 156, 20],
+      [156, 204, 15],
+      [170, 246, 34]
     ];
     this.profileRivers();
     this.placeLake();
-
-    for (let i = 0; i < this.clearings.length; i++) {
-      const raw = this.computeHeight(this.clearings[i].x, this.clearings[i].z);
-      this.clearings[i].h = Math.min(12, Math.max(2.4, raw));
-    }
 
     this.initTerrain();
     this.initRivers();
@@ -348,46 +354,64 @@ export class Terrain {
     return sum / norm;
   }
 
-  islandRadius(x, z, ang) {
-    const n = this.fbm(x * 0.00072 + 4.2, z * 0.00072 - 6.5, 4);
-    const lobes = Math.sin(ang * 2) * 160 + Math.sin(ang * 5 + 1.7) * 90 + Math.cos(ang * 3 - 0.6) * 70;
-    return 2280 + lobes + (n - 0.5) * 620;
+  canopyRadius(ang) {
+    const c = Math.cos(ang);
+    const s = Math.sin(ang);
+    const n = this.fbm(c * 2.4 + 1.7, s * 2.4 - 0.8, 2);
+    return 116 + Math.sin(ang * 3 + 0.5) * 7 + Math.sin(ang * 5 - 0.9) * 3.2 + (n - 0.5) * 7;
   }
 
-  cliffStrength(x, z, ang) {
-    const west = smoother(280, -500, x);
-    const bands = 0.5 + 0.5 * Math.sin(ang * 2 + 0.7);
-    const n = this.fbm(x * 0.0009 + 2, z * 0.0009, 3);
-    return west * smoother(0.46, 0.74, bands * 0.45 + n * 0.75);
+  coastRadius(ang) {
+    const east = Math.max(0, Math.cos(ang));
+    return this.canopyRadius(ang) + 38 + east * east * 16;
+  }
+
+  spitInside(x, z) {
+    const pts = this.spit;
+    let best = -1e9;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const ax = pts[i][0];
+      const az = pts[i][1];
+      const aw = pts[i][2];
+      const bx = pts[i + 1][0];
+      const bz = pts[i + 1][1];
+      const bw = pts[i + 1][2];
+      const abx = bx - ax;
+      const abz = bz - az;
+      const len2 = abx * abx + abz * abz;
+      let u = len2 > 1e-6 ? ((x - ax) * abx + (z - az) * abz) / len2 : 0;
+      if (u < 0) u = 0;
+      else if (u > 1) u = 1;
+      const dist = Math.hypot(x - (ax + abx * u), z - (az + abz * u));
+      const inside = aw + (bw - aw) * u - dist;
+      if (inside > best) best = inside;
+    }
+    return best;
+  }
+
+  beachPark() {
+    const ang = Math.PI / 2;
+    const canopy = this.canopyRadius(ang);
+    const coast = this.coastRadius(ang);
+    return { x: 0, z: canopy + (coast - canopy) * 0.4, heading: 0 };
+  }
+
+  islandRadius(x, z, ang) {
+    return Math.max(this.coastRadius(ang), Math.hypot(x, z) + this.spitInside(x, z));
+  }
+
+  cliffStrength() {
+    return 0;
   }
 
   inlandHeight(x, z) {
-    const broad = this.fbm(x * 0.00145, z * 0.00145, 4);
-    const fine = this.fbm(x * 0.0034 + 22, z * 0.0034 - 14, 3);
-    let h = 4.4 + broad * 6.8 + (fine - 0.5) * 2.2;
-
-    const md = Math.hypot(x + 1200, z + 1000);
-    const mMask = smoother(1700, 220, md);
-    if (mMask > 0.001) {
-      const rn = this.fbm(x * 0.00125 + 3, z * 0.00125 - 5, 4);
-      const ridged = 1 - Math.abs(rn * 2 - 1);
-      h += mMask * (22 + ridged * ridged * 150);
-      h += (this.fbm(x * 0.0055 + 1, z * 0.0055, 3) - 0.5) * 16 * mMask;
-    }
-    return h;
+    const broad = this.fbm(x * 0.012, z * 0.012, 3);
+    const fine = this.fbm(x * 0.045 + 3, z * 0.045, 2);
+    return 2.4 + broad * 3.4 + (fine - 0.5) * 1.1;
   }
 
   dryHeight(x, z) {
-    const dist = Math.hypot(x, z);
-    const ang = dist > 0.001 ? Math.atan2(z, x) : 0;
-    const shoreDist = this.islandRadius(x, z, ang) - dist;
-    const info = {
-      shoreDist,
-      beachReach: 90,
-      cliff: shoreDist < 280 ? this.cliffStrength(x, z, ang) : 0
-    };
-    if (shoreDist < -150) return Math.max(-32, shoreDist * 0.045);
-    return this.applyCoast(x, z, this.inlandHeight(x, z), info);
+    return this.computeHeight(x, z);
   }
 
   profileRivers() {
@@ -407,6 +431,8 @@ export class Terrain {
   }
 
   placeLake() {
+    this.lake = null;
+    if (!this.rivers.length) return;
     const river = this.rivers[0];
     let idx = 0;
     let best = 1;
@@ -605,62 +631,49 @@ export class Terrain {
     const info = this._info;
     const dist = Math.hypot(x, z);
     const ang = dist > 0.001 ? Math.atan2(z, x) : 0;
-    const shoreDist = this.islandRadius(x, z, ang) - dist;
-    const river = this.closestRiver(x, z);
+    const canopyDist = this.canopyRadius(ang) - dist;
+    const spit = this.spitInside(x, z);
+    const shoreDist = Math.max(this.coastRadius(ang) - dist, spit);
 
     info.shoreDist = shoreDist;
-    info.riverDist = river.d;
-    info.riverT = river.t;
-    info.riverIndex = river.index;
-    info.lakeE = this.lakeEllipse(x, z);
+    info.canopyDist = canopyDist;
+    info.onSpit = spit > 0 && canopyDist < 4;
+    info.beachReach = 42;
+    info.cliff = 0;
+    info.onBar = false;
+    info.clearing = 0;
+    info.forest = canopyDist > 0.4;
+    info.riverDist = 1e6;
+    info.riverT = 0;
+    info.riverIndex = -1;
+    info.lakeE = 99;
 
-    if (shoreDist < -150 && river.d > 160) {
-      info.beachReach = 90;
-      info.cliff = 0;
-      info.onBar = false;
-      info.clearing = 0;
-      info.forest = false;
-      info.lakeE = 99;
-      info.height = Math.max(-32, shoreDist * 0.045);
-      return info.height;
+    let h;
+    if (shoreDist < -70) {
+      h = Math.max(-20, -1.6 + (shoreDist + 70) * 0.18);
+    } else if (shoreDist < -1) {
+      h = lerp(-1.45, -0.55, smoother(-68, -2, shoreDist));
+    } else if (canopyDist < 1) {
+      h = lerp(0.78, 1.22, smoother(0, 34, shoreDist));
+      h += (this.fbm(x * 0.08, z * 0.08, 2) - 0.5) * 0.08;
+    } else {
+      h = lerp(1.15, this.inlandHeight(x, z), smoother(0, 16, canopyDist));
     }
 
-    info.beachReach = 82 + this.fbm(x * 0.0013 + 11, z * 0.0013, 2) * 48;
-    info.cliff = shoreDist < 280 ? this.cliffStrength(x, z, ang) : 0;
+    if (!this._park) this._park = this.beachPark();
+    const pad = Math.hypot(x - this._park.x, z - this._park.z);
+    if (pad < 16) h = lerp(1.02, h, smoother(7, 16, pad));
 
-    let h = this.inlandHeight(x, z);
-    h = this.applyCoast(x, z, h, info);
-    const carved = this.applyRiver(x, z, h, info);
-    h = this.applyLake(x, z, carved.h, info);
-    info.onBar = carved.onBar;
-
-    const clearing = this.clearingWeight(x, z);
-    const onRunway = Math.abs(x) < 15 && Math.abs(z - 150) < 66;
-    info.clearing = onRunway ? clearing.w : 0;
-    if (clearing.w > 0) h = lerp(h, clearing.h, clearing.w);
-
-    if (clearing.w < 0.3 && !info.onBar && shoreDist > info.beachReach && h > 1 && h < 42 && info.cliff < 0.45) {
-      h += (this.fbm(x * 0.017 + 4, z * 0.017, 2) - 0.5) * 0.55 * (1 - clearing.w);
-    }
-
-    info.forest = this.fbm(x * 0.00105 + 6.5, z * 0.00105 - 4.2, 3) > 0.52;
     info.height = h;
     return h;
   }
 
-  classify(info, height, slope) {
-    if (info.lakeE < 0.84) return 'lake';
-    if (info.lakeE < 1.15 && height < this.lake.level + 2.4) return 'sand';
-    if (info.riverDist < 11 && info.riverT > 0.08) return 'river';
+  classify(info, height) {
     if (height < 0.22) return 'ocean';
-    if (info.clearing > 0.55 && height > 0.45) return 'clearing';
-    if (info.onBar && height > 0.35 && height < 8) return 'gravel';
-    if (info.cliff > 0.62 && info.shoreDist < 95 && info.shoreDist > -20 && height > 4) return 'rock';
-    if (slope > 0.5 && height > 1.5) return 'rock';
-    if (info.cliff < 0.5 && info.shoreDist < info.beachReach && info.shoreDist > -8 && height < 4.6 && height > 0.2) return 'sand';
-    if (info.forest && height > 2.2 && height < 96 && slope < 0.42 && info.clearing < 0.2) return 'forest';
-    if (height > 128) return 'rock';
-    return 'grass';
+    if (info.canopyDist > 0.4 && height > 0.7) return 'forest';
+    if (info.shoreDist > -6 && height < 3.2) return 'sand';
+    if (height < 0.45) return 'ocean';
+    return 'forest';
   }
 
   getHeightAt(x, z) {
@@ -702,7 +715,9 @@ export class Terrain {
       slope,
       kind: this.classify(info, height, slope),
       riverDist: info.riverDist,
-      shoreDist: info.shoreDist
+      shoreDist: info.shoreDist,
+      canopyDist: info.canopyDist,
+      onSpit: info.onSpit
     };
   }
 
@@ -742,17 +757,18 @@ export class Terrain {
   colorFor(kind, h, slope, x, z, out) {
     const n = this.fbm(x * 0.007, z * 0.007, 3);
     const n2 = this.fbm(x * 0.018 + 5.0, z * 0.018, 2);
-    if (h < 0.25) {
-      mix3([0.62, 0.54, 0.36], [0.04, 0.14, 0.18], smoother(0.25, -12, h), out);
+    if (kind === 'ocean' || h < 0.25) {
+      if (h > -1.7) mix3([0.76, 0.68, 0.5], [0.4, 0.58, 0.52], smoother(-0.15, -1.7, h), out);
+      else mix3([0.05, 0.32, 0.36], [0.02, 0.12, 0.16], smoother(-2, -14, h), out);
     } else if (kind === 'sand') {
-      mix3([0.62, 0.52, 0.34], [0.8, 0.72, 0.5], n, out);
-      if (h < 0.9) mix3(out, [0.5, 0.42, 0.28], smoother(0.9, 0.25, h), out);
+      mix3([0.84, 0.76, 0.58], [0.94, 0.88, 0.72], n, out);
+      if (h < 1.05) mix3(out, [0.7, 0.6, 0.42], smoother(1.05, 0.5, h), out);
     } else if (kind === 'gravel') {
       mix3([0.5, 0.44, 0.34], [0.68, 0.6, 0.46], n, out);
     } else if (kind === 'clearing') {
       mix3([0.52, 0.46, 0.28], [0.66, 0.56, 0.34], n2, out);
     } else if (kind === 'forest') {
-      mix3([0.22, 0.46, 0.12], [0.34, 0.58, 0.16], n, out);
+      mix3([0.07, 0.12, 0.05], [0.12, 0.18, 0.07], n, out);
     } else if (kind === 'lake') {
       mix3([0.16, 0.42, 0.4], [0.1, 0.28, 0.3], clamp01(h / 8), out);
     } else if (kind === 'river') {
@@ -760,7 +776,7 @@ export class Terrain {
     } else if (kind === 'rock') {
       mix3([0.45, 0.42, 0.38], [0.3, 0.28, 0.26], clamp01(slope * 1.2), out);
     } else {
-      mix3([0.46, 0.66, 0.16], [0.64, 0.78, 0.22], n, out);
+      mix3([0.2, 0.3, 0.12], [0.28, 0.38, 0.16], n, out);
     }
 
     if (h > 145) mix3(out, [0.9, 0.92, 0.93], smoother(145, 170, h), out);
@@ -851,6 +867,7 @@ export class Terrain {
   }
 
   initRivers() {
+    if (!this.rivers.length) return;
     const positions = [];
     const uvs = [];
     const indices = [];
@@ -966,7 +983,7 @@ export class Terrain {
       waterNormals: this.waterNormals(),
       sunDirection: sun,
       sunColor: 0x9eb4c4,
-      waterColor: 0x0b5a78,
+      waterColor: 0x1a9a9a,
       distortionScale: distortion,
       fog: true
     });
@@ -986,7 +1003,10 @@ export class Terrain {
 
   initOcean() {
     const geo = new THREE.PlaneGeometry(36000, 36000, 1, 1);
-    this.ocean = this.makeWater(geo, 0.045, 5.5);
+    this.ocean = this.makeWater(geo, 0.045, 2.6);
+    this.ocean.material.uniforms.alpha.value = 1;
+    this.ocean.material.transparent = false;
+    this.ocean.material.depthWrite = true;
     this.ocean.position.y = 0.12;
     this.scene.add(this.ocean);
     this.initLake();
@@ -994,6 +1014,7 @@ export class Terrain {
 
   initLake() {
     const lake = this.lake;
+    if (!lake) return;
     const geo = new THREE.CircleGeometry(1, 48);
     const pos = geo.attributes.position;
     const co = Math.cos(lake.rot);
@@ -1036,8 +1057,15 @@ export class Terrain {
       if (matName === 'grass' || matName === 'cliff' || matName === 'stone') {
         material.color.setRGB(1, 1, 1);
         material.roughness = matName === 'grass' ? 0.9 : 0.95;
-      } else if (material.roughness < 0.7) {
-        material.roughness = 0.84;
+      }
+      if (material.transparent || material.alphaTest > 0) {
+        material.transparent = false;
+        material.alphaTest = Math.max(material.alphaTest, 0.45);
+        material.depthWrite = true;
+        material.side = THREE.DoubleSide;
+      }
+      if (/tree|palm|banana|jungle|plant|flower|bush|grass|pineapple|coconut/i.test(root.name)) {
+        fadeNearCamera(material);
       }
       parts.push({ geometry, material });
     });
@@ -1055,7 +1083,7 @@ export class Terrain {
     );
     for (const part of parts) {
       part.geometry.applyMatrix4(shift);
-      part.geometry.computeVertexNormals();
+      if (!part.geometry.attributes.normal) part.geometry.computeVertexNormals();
       part.geometry.computeBoundingSphere();
       if ((part.material.name || '').toLowerCase() === 'cliff') {
         const pos = part.geometry.attributes.position;
@@ -1168,39 +1196,30 @@ export class Terrain {
       }
     };
 
-    const forestTree = (surface) => surface.kind === 'forest' && surface.height > 2 && surface.slope < 0.42;
-    const openWood = (surface, x, z) => {
-      if (surface.kind !== 'grass' || surface.height < 1.5 || surface.slope > 0.22) return false;
-      if (Math.abs(x) < 40 && Math.abs(z - 150) < 120) return false;
-      return true;
+    const forestTree = (surface) => surface.kind === 'forest' && surface.height > 0.85 && surface.slope < 0.55;
+    const tree = {
+      canopy: true,
+      color: (tint, r) => {
+        const lift = r();
+        tint.setRGB(0.86 + lift * 0.14, 0.9 + lift * 0.1, 0.82 + lift * 0.1);
+      }
     };
-    const tree = { canopy: true };
-    plant('Tree.001', 1500, 2900, (s, _x, _z, r) => forestTree(s) ? 0.75 + r() * 0.5 : 0, tree);
-    plant('Tree 002', 1300, 2900, (s, _x, _z, r) => forestTree(s) ? 0.8 + r() * 0.55 : 0, tree);
-    plant('Tree 003', 1000, 2900, (s, _x, _z, r) => forestTree(s) ? 0.7 + r() * 0.5 : 0, tree);
-    plant('Tree.004', 800, 2900, (s, _x, _z, r) => forestTree(s) ? 0.65 + r() * 0.45 : 0, tree);
-    plant('Tree.001', 280, 2700, (s, x, z, r) => openWood(s, x, z) && r() < 0.55 ? 0.7 + r() * 0.4 : 0, tree);
-    plant('Tree 002', 240, 2700, (s, x, z, r) => openWood(s, x, z) ? 0.75 + r() * 0.45 : 0, tree);
-    plant('Tree.004', 160, 2700, (s, x, z, r) => openWood(s, x, z) && r() < 0.4 ? 0.6 + r() * 0.35 : 0, tree);
+    const jungle = (s, _x, _z, r) => (forestTree(s) ? 2.3 + r() * 1.15 : 0);
+    plant('JungleTree01', 340, 140, jungle, tree);
+    plant('JungleTree02', 280, 140, jungle, tree);
+    plant('JungleTree01', 120, 70, jungle, tree);
+    plant('JungleTree02', 90, 70, jungle, tree);
+    plant('BananaTree01', 90, 130, (s, _x, _z, r) => (forestTree(s) ? 1.7 + r() * 0.7 : 0), tree);
+    plant('BananaTree02', 70, 130, (s, _x, _z, r) => (forestTree(s) ? 1.5 + r() * 0.6 : 0), tree);
 
-    plant('Dead tree 1', 110, 2700, (s, _x, _z, r) => {
-      if ((s.kind !== 'forest' && s.kind !== 'rock') || s.height < 4 || s.slope > 0.5) return 0;
-      return 0.75 + r() * 0.4;
-    }, tree);
-    plant('Dead tree 2', 90, 2700, (s, _x, _z, r) => {
-      if (s.kind !== 'forest' && s.kind !== 'rock') return 0;
-      if (s.height < 3 || s.slope > 0.48) return 0;
-      return 0.8 + r() * 0.45;
-    }, tree);
-
-    plant('Bush 1', 900, 2800, (s, _x, _z, r) => {
-      if ((s.kind !== 'forest' && s.kind !== 'grass') || s.height < 1.2 || s.slope > 0.34) return 0;
-      return 0.55 + r() * 0.7;
-    });
-    plant('Bush 2', 800, 2800, (s, _x, _z, r) => {
-      if ((s.kind !== 'forest' && s.kind !== 'grass') || s.height < 1 || s.slope > 0.32) return 0;
-      return 0.6 + r() * 0.75;
-    });
+    const palm = (s, _x, _z, r) => {
+      if (s.onSpit || s.canopyDist > 20 || s.canopyDist < -3) return 0;
+      if (s.kind !== 'forest' && s.kind !== 'sand') return 0;
+      return 1.9 + r() * 0.8;
+    };
+    plant('Palm01', 70, 150, palm, tree);
+    plant('Palm02', 60, 150, palm, tree);
+    plant('Palm03', 36, 150, palm, tree);
 
     const supported = (x, z, h) => {
       return this.getHeightAt(x + 5, z) > h - 2.5
@@ -1212,9 +1231,8 @@ export class Terrain {
       if (s.slope > 0.48 || !supported(x, z, s.height)) return 0;
       const bar = s.kind === 'gravel';
       const cliff = s.kind === 'rock' && s.slope > 0.16;
-      const shore = s.kind === 'sand' && r() < 0.55;
-      const meadow = s.kind === 'grass' && s.slope < 0.16 && r() < 0.08;
-      if (!bar && !cliff && !shore && !meadow) return 0;
+      const shore = s.kind === 'sand' && !s.onSpit && s.canopyDist > -28 && r() < 0.08;
+      if (!bar && !cliff && !shore) return 0;
       return cliff ? 0.85 + r() * 1.7 : 0.45 + r() * 1.05;
     };
     const stoneColor = (color, r) => {
@@ -1227,7 +1245,7 @@ export class Terrain {
       'Icosphere.005', 'Icosphere.006', 'Icosphere.007', 'Icosphere.008', 'Icosphere.009',
       'Icosphere.010', 'Icosphere.011', 'Icosphere.012', 'Icosphere.013', 'Icosphere.014'
     ]) {
-      plant(name, 70, 2900, (s, x, z, r) => stoneHere(s, x, z, r), {
+      plant(name, 3, 160, (s, x, z, r) => stoneHere(s, x, z, r), {
         tries: 30,
         color: stoneColor,
         sink: (scale) => scale * 0.18,
@@ -1238,31 +1256,26 @@ export class Terrain {
       });
     }
 
-    plant('Mushroom 1', 160, 2600, (s, _x, _z, r) => {
-      if (s.kind !== 'forest' || s.slope > 0.28 || s.height < 2) return 0;
+    plant('Mushroom 1', 36, 140, (s, _x, _z, r) => {
+      if (s.kind !== 'forest' || s.slope > 0.35 || s.height < 1) return 0;
       return 0.4 + r() * 0.45;
     });
-    plant('Mushroom 2', 120, 2600, (s, _x, _z, r) => {
-      if (s.kind !== 'forest' || s.slope > 0.26 || s.height < 2) return 0;
+    plant('Mushroom 2', 24, 140, (s, _x, _z, r) => {
+      if (s.kind !== 'forest' || s.slope > 0.35 || s.height < 1) return 0;
       return 0.35 + r() * 0.4;
     });
 
-    const meadow = (s, x, z, r) => {
-      if (s.kind === 'clearing') return 0;
-      const open = s.kind === 'grass';
-      const beach = s.kind === 'sand' && r() < 0.3;
-      if ((!open && !beach) || s.height < 0.6 || s.slope > 0.28) return 0;
-      if (Math.abs(x) < 28 && Math.abs(z - 150) < 90) return 0;
-      return 0.4 + r() * 0.55;
-    };
-    for (const name of ['Plant 1', 'Plant 2', 'Plant 3', 'BezierCurve', 'BezierCurve.009', 'Plane.003', 'Plane.006']) {
-      plant(name, 280, 2700, meadow);
-    }
-
-    plant('Log', 70, 2600, (s, _x, _z, r) => (s.kind === 'forest' && s.slope < 0.3 ? 0.75 + r() * 0.5 : 0));
-    plant('Root ', 60, 2600, (s, _x, _z, r) => (s.kind === 'forest' && s.slope < 0.32 ? 0.7 + r() * 0.5 : 0));
-    plant('Branch 1', 90, 2600, (s, _x, _z, r) => (s.kind === 'forest' && s.slope < 0.34 ? 0.7 + r() * 0.6 : 0));
-    plant('Branch 2', 80, 2600, (s, _x, _z, r) => (s.kind === 'forest' && s.slope < 0.34 ? 0.75 + r() * 0.55 : 0));
+    const understory = (s, _x, _z, r) => (s.kind === 'forest' && s.slope < 0.4 ? 0.9 + r() * 0.55 : 0);
+    plant('TropicalPlant01', 200, 140, understory);
+    plant('TropicalPlant02', 180, 140, understory);
+    plant('TropicalPlant03', 160, 140, understory);
+    plant('PineapplePlant', 90, 140, understory);
+    plant('TropicalFlower01', 120, 140, (s, _x, _z, r) => (s.kind === 'forest' ? 0.85 + r() * 0.4 : 0));
+    plant('TropicalFlower01.001', 100, 140, (s, _x, _z, r) => (s.kind === 'forest' ? 0.85 + r() * 0.4 : 0));
+    plant('Banana', 40, 130, (s, _x, _z, r) => (s.kind === 'forest' ? 0.8 + r() * 0.4 : 0));
+    plant('Coconut', 36, 140, (s, _x, _z, r) => (s.kind === 'forest' ? 0.8 + r() * 0.35 : 0));
+    plant('CoconutHalf', 24, 140, (s, _x, _z, r) => (s.kind === 'forest' ? 0.8 + r() * 0.35 : 0));
+    plant('Pineapple', 30, 130, (s, _x, _z, r) => (s.kind === 'forest' ? 0.85 + r() * 0.35 : 0));
 
     this.scatterStaticGrass(props);
     this.buildCliffCoast(props);
@@ -1319,8 +1332,8 @@ export class Terrain {
     const coniferMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.86 });
     const crownMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.84 });
 
-    const coniferCount = 2800;
-    const broadCount = 1600;
+    const coniferCount = 420;
+    const broadCount = 260;
     const coniferTrunk = new THREE.InstancedMesh(trunkGeo, trunkMat, coniferCount);
     const coniferCrown = new THREE.InstancedMesh(coniferGeo, coniferMat, coniferCount);
     const broadTrunk = new THREE.InstancedMesh(broadTrunkGeo, trunkMat, broadCount);
@@ -1330,10 +1343,10 @@ export class Terrain {
     const broadColor = new THREE.Color();
     let conifers = 0;
     let broads = 0;
-    for (let n = 0; n < 22000 && (conifers < coniferCount || broads < broadCount); n++) {
-      const [x, z] = this.sampleDisc(rng, 2900);
+    for (let n = 0; n < 8000 && (conifers < coniferCount || broads < broadCount); n++) {
+      const [x, z] = this.sampleDisc(rng, 145);
       const surface = this.getSurfaceAt(x, z);
-      if (surface.kind !== 'forest' || surface.height < 2 || surface.slope > 0.48) continue;
+      if (surface.kind !== 'forest' || surface.height < 0.85 || surface.slope > 0.55) continue;
       const scale = 0.75 + rng() * 1.05;
       dummy.position.set(x, surface.height, z);
       dummy.rotation.set(0, rng() * Math.PI * 2, 0);
@@ -1342,13 +1355,13 @@ export class Terrain {
       if (rng() < 0.62 && conifers < coniferCount) {
         coniferTrunk.setMatrixAt(conifers, dummy.matrix);
         coniferCrown.setMatrixAt(conifers, dummy.matrix);
-        coniferColor.setRGB(0.1 + rng() * 0.08, 0.32 + rng() * 0.16, 0.1);
+        coniferColor.setRGB(0.1 + rng() * 0.06, 0.28 + rng() * 0.12, 0.08);
         coniferCrown.setColorAt(conifers, coniferColor);
         conifers++;
       } else if (broads < broadCount) {
         broadTrunk.setMatrixAt(broads, dummy.matrix);
         broadCrown.setMatrixAt(broads, dummy.matrix);
-        broadColor.setRGB(0.16 + rng() * 0.12, 0.4 + rng() * 0.18, 0.1);
+        broadColor.setRGB(0.18 + rng() * 0.1, 0.36 + rng() * 0.12, 0.1);
         broadCrown.setColorAt(broads, broadColor);
         broads++;
       }
@@ -1366,12 +1379,12 @@ export class Terrain {
 
     const rockGeo = new THREE.DodecahedronGeometry(1, 0);
     const rockMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.96 });
-    const rockCount = 800;
+    const rockCount = 40;
     const rocks = new THREE.InstancedMesh(rockGeo, rockMat, rockCount);
     const rockColor = new THREE.Color();
     let rockN = 0;
     for (let n = 0; n < 14000 && rockN < rockCount; n++) {
-      const [x, z] = this.sampleDisc(rng, 2800);
+      const [x, z] = this.sampleDisc(rng, 160);
       const surface = this.getSurfaceAt(x, z);
       const barEdge = surface.kind === 'gravel' && surface.riverDist > 50 && surface.riverDist < 78;
       const cliffBase = surface.kind === 'rock' && surface.shoreDist < 80 && surface.shoreDist > -6 && surface.height < 48;
@@ -1403,25 +1416,19 @@ export class Terrain {
       alphaTest: 0.28,
       side: THREE.DoubleSide
     });
+    fadeNearCamera(grassMat);
     const grassCount = 6500;
     const grass = new THREE.InstancedMesh(grassGeo, grassMat, grassCount);
     const grassColor = new THREE.Color();
     let grassN = 0;
-    for (let n = 0; n < 16000 && grassN < grassCount; n++) {
-      let x;
-      let z;
-      if (rng() < 0.22) {
-        const c = this.clearings[(rng() * this.clearings.length) | 0];
-        x = c.x + (rng() - 0.5) * c.rx * 2.4;
-        z = c.z + (rng() - 0.5) * c.rz * 2.4;
-      } else {
-        const sample = this.sampleDisc(rng, 2700);
-        x = sample[0];
-        z = sample[1];
-      }
+    for (let n = 0; n < 4000 && grassN < grassCount; n++) {
+      const sample = this.sampleDisc(rng, 150);
+      const x = sample[0];
+      const z = sample[1];
       const surface = this.getSurfaceAt(x, z);
-      if (surface.height < 0.8 || surface.slope > 0.4) continue;
-      if (surface.kind !== 'grass' && surface.kind !== 'forest' && surface.kind !== 'clearing') continue;
+      if (surface.canopyDist > 12 || surface.canopyDist < -4) continue;
+      if (surface.onSpit && surface.canopyDist < -2) continue;
+      if (surface.height < 0.6 || surface.slope > 0.45) continue;
       const scale = 0.85 + rng() * 0.9;
       dummy.position.set(x, surface.height, z);
       dummy.rotation.set(0, rng() * Math.PI, 0);
@@ -1447,9 +1454,9 @@ export class Terrain {
     if (!variants.length || !this.kindGrid) return;
 
     this.grassChunks = [];
-    const chunk = 150;
-    const reach = 2200;
-    const step = 1.45;
+    const chunk = 70;
+    const reach = 150;
+    const step = 1.25;
     const half = this.size / 2;
     const stride = this.segments + 1;
     const dummy = new THREE.Object3D();
@@ -1466,19 +1473,16 @@ export class Terrain {
             const n = this.hash(ix, iz);
             const px = x + (n - 0.5) * step * 0.7;
             const pz = z + (this.hash(ix + 3, iz - 5) - 0.5) * step * 0.7;
-            if (Math.abs(px) < 16 && Math.abs(pz - 150) < 70) continue;
+            const edge = this.canopyRadius(Math.atan2(pz, px)) - Math.hypot(px, pz);
+            if (edge < 0.8) continue;
+            if (this.spitInside(px, pz) > 4) continue;
             const gx = Math.min(this.segments, Math.max(0, Math.round((px + half) / this.step)));
             const gz = Math.min(this.segments, Math.max(0, Math.round((pz + half) / this.step)));
             const code = this.kindGrid[gz * stride + gx];
-            if (!code) continue;
             if (this.slopeFromGrid(gx, gz) > 0.48) continue;
             const h = this.getHeightAt(px, pz);
-            if (h < 0.65) continue;
-            if (code === 1) {
-              if (n < 0.02) continue;
-            } else if (h < 8) {
-              if (n < 0.62) continue;
-            } else if (n < 0.34) continue;
+            if (h < 0.65 || code !== 1) continue;
+            if (n < 0.06) continue;
             const vi = Math.abs((Math.imul(ix, 13) + Math.imul(iz, 29)) % variants.length);
             const prop = variants[vi];
             const heightScale = Math.min(1.05, (0.5 + n * 0.22) * (0.68 / Math.max(prop.spanY, 0.5)));
@@ -1539,7 +1543,7 @@ export class Terrain {
       const ca = Math.cos(a);
       const sa = Math.sin(a);
       let best = null;
-      for (let r = 3000; r > 1200; r -= 12) {
+      for (let r = 360; r > 80; r -= 8) {
         const x = ca * r;
         const z = sa * r;
         const h = this.getHeightAt(x, z);
@@ -1692,7 +1696,11 @@ export class Terrain {
     }
   }
 
-  update(delta, focusX, focusZ) {
+  update(delta, focusX, focusZ, focusY, reveal) {
+    if (focusX != null) {
+      foliageFocus.set(focusX, focusY || 0, focusZ);
+      foliageReveal.value = reveal ? 1 : 0;
+    }
     this.oceanTime += delta;
     if (this.ocean && this.ocean.material.uniforms.time) {
       this.ocean.material.uniforms.time.value = this.oceanTime;
