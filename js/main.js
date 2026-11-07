@@ -7,9 +7,11 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { AssetLoader } from './loaders.js';
 import { Terrain } from './terrain.js';
 import { Player } from './player.js';
+import { Smurf } from './smurf.js';
 import { Aircraft } from './aircraft.js';
 import { FieldKit } from './fieldkit.js';
 import { GroundFx } from './groundfx.js';
+import { Soundscape } from './audio.js';
 
 class Game {
   constructor() {
@@ -37,6 +39,8 @@ class Game {
     this.initInputs();
 
     this.clock = new THREE.Clock();
+    this.audio = new Soundscape();
+    this.wasAirborne = false;
     this.boot();
   }
 
@@ -200,6 +204,7 @@ class Game {
 
   initInputs() {
     window.addEventListener('keydown', (e) => {
+      this.audio.unlock();
       if (!this.keys[e.code]) {
         this.keyJustPressed[e.code] = true;
       }
@@ -213,6 +218,7 @@ class Game {
 
     this.walkZoom = 0;
     this.canvas.addEventListener('click', () => {
+      this.audio.unlock();
       this.canvas.requestPointerLock();
     });
     this.canvas.addEventListener('wheel', (e) => {
@@ -249,9 +255,16 @@ class Game {
     if (natureScene) this.terrain.scatterNature(natureScene, packs);
     else this.terrain.initProps();
     this.terrain.scatterClouds(cloudScene);
-    const humanMesh = await loader.loadHuman().catch(() => loader.createHumanAvatar());
+    const [humanMesh, smurfMesh] = await Promise.all([
+      loader.loadHuman().catch(() => loader.createHumanAvatar()),
+      loader.loadSmurf().catch((err) => {
+        console.warn('Smurf failed to load', err);
+        return null;
+      })
+    ]);
 
     this.player = new Player(this.scene, this.terrain, humanMesh);
+    this.smurf = smurfMesh ? new Smurf(this.scene, this.terrain, smurfMesh) : null;
     this.aircraft = new Aircraft(this.scene, this.terrain, piperMesh);
     const camTarget = this.player.position;
     const yaw = this.player.mesh.rotation.y;
@@ -263,6 +276,7 @@ class Game {
     this.camera.lookAt(camTarget.x, camTarget.y + 0.8, camTarget.z);
     this.field = new FieldKit(this.scene, this.terrain, this.aircraft);
     this.groundFx = new GroundFx(this.scene, this.terrain);
+    this.groundFx.audio = this.audio;
     this.groundShadow = this.createGroundShadow();
     this.animate();
   }
@@ -385,6 +399,7 @@ class Game {
       if (dist < 4.5 && parked) {
         this.uiPrompt.innerText = 'Press [E] to Enter Aircraft';
         if (this.keyJustPressed['KeyE']) {
+          this.audio.click();
           this.mode = 'IN_AIRCRAFT';
           this.planeLookYaw = 0;
           this.planeLookPitch = 0;
@@ -402,15 +417,25 @@ class Game {
       } else {
         this.uiPrompt.innerText = '';
       }
-      if (atWater && this.keyJustPressed['KeyF']) this.field.collectWater();
-      if (nearPlane && this.keyJustPressed['KeyG']) this.field.togglePanel();
+      if (atWater && this.keyJustPressed['KeyF']) {
+        this.field.collectWater();
+        this.audio.pour();
+      }
+      if (nearPlane && this.keyJustPressed['KeyG']) {
+        this.field.togglePanel();
+        this.audio.flap();
+      }
     } else if (this.mode === 'IN_AIRCRAFT') {
       if (this.aircraftState === 'PARKED') {
         this.uiPrompt.innerText = this.field.panelOut
           ? 'Stow the solar panel [G] before adding power'
           : 'Hold [W] to add power and take off. [S] reduces power. [E] Exit';
-        if (this.keyJustPressed['KeyG'] && this.field.panelOut) this.field.togglePanel();
+        if (this.keyJustPressed['KeyG'] && this.field.panelOut) {
+          this.field.togglePanel();
+          this.audio.flap();
+        }
         if (this.keyJustPressed['KeyE']) {
+          this.audio.click();
           this.mode = 'ON_FOOT';
           this.player.position.copy(this.aircraft.position).add(new THREE.Vector3(3, 0, 0));
           this.player.setActive(true);
@@ -452,9 +477,14 @@ class Game {
       }
     }
     this.player.update(delta, this.keys);
+    if (this.smurf) this.smurf.update(delta, this.player, onFoot);
     if (this.groundFx && this.player) {
       const running = this.keys['ShiftLeft'] || this.keys['ShiftRight'];
       this.groundFx.updateFeet(this.player, onFoot && moving, running);
+      if (this.smurf) {
+        const smurfMoving = this.smurf.pose !== 'idle';
+        this.groundFx.updateFeet(this.smurf, smurfMoving, this.smurf.pose === 'run', 'smurf', 0.58);
+      }
     }
     if (this.groundFx && this.aircraft) {
       const groundY = this.terrain.getHeightAt(this.aircraft.position.x, this.aircraft.position.z);
@@ -487,8 +517,25 @@ class Game {
 
     if (this.mode === 'IN_AIRCRAFT' && this.aircraft) {
       const rejected = this.aircraft.updatePoweredFlight(delta, this.keys, this.field && this.field.panelOut);
+      if (rejected && this.landingHint <= 0) this.audio.scrape();
       if (rejected) this.landingHint = 3;
       this.aircraftState = !this.aircraft.airborne && this.aircraft.speed < 0.8 ? 'PARKED' : 'FLYING';
+    }
+    if (this.aircraft) {
+      if (this.wasAirborne === false && this.aircraft.airborne) this.audio.liftoff();
+      if (this.wasAirborne === true && !this.aircraft.airborne) this.audio.touchdown();
+      this.wasAirborne = this.aircraft.airborne;
+      const surface = this.player
+        ? this.terrain.getSurfaceAt(this.player.position.x, this.player.position.z)
+        : null;
+      let wind = 0;
+      if (onFoot && surface) {
+        const open = 1 - Math.min(1, Math.max(0, surface.canopyDist) / 18);
+        const coast = 1 - Math.min(1, Math.max(0, surface.shoreDist) / 50);
+        wind = 0.25 + open * 0.35 + coast * 0.4;
+      }
+      this.audio.wind(wind);
+      this.audio.prop(this.aircraft.power, this.aircraft.speed, this.aircraft.airborne);
     }
 
     if (this.landingHint > 0) this.landingHint -= delta;
