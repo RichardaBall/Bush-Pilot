@@ -51,9 +51,11 @@ export class GroundFx {
     this.lastGear = [null, null, null];
     this.puffGeo = new THREE.PlaneGeometry(0.7, 0.7);
     this.soleGeo = makeSoleGeometry();
+    this.rippleGeo = new THREE.RingGeometry(0.28, 0.46, 18);
     this.stepCarry = 0;
     this.lastStep = null;
     this.footSide = 1;
+    this.ripples = [];
   }
 
   surfaceTint(kind) {
@@ -131,7 +133,8 @@ export class GroundFx {
     const x = player.position.x + cos * lateral - sin * 0.06;
     const z = player.position.z - sin * lateral - cos * 0.06;
     const surface = this.terrain.getSurfaceAt(x, z);
-    if (surface.kind === 'ocean' || surface.kind === 'river' || surface.kind === 'lake') return;
+    const water = this.terrain.waterAt(x, z);
+    if (water.depth > 0.05 || surface.kind === 'ocean' || surface.kind === 'river' || surface.kind === 'lake') return;
     const tint = this.surfaceTint(surface.kind);
     const material = new THREE.MeshBasicMaterial({
       color: new THREE.Color(tint[0] * 0.32, tint[1] * 0.3, tint[2] * 0.26),
@@ -157,6 +160,28 @@ export class GroundFx {
     }
   }
 
+  spawnRipple(x, z, surfaceY) {
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xd7f2ee,
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+      side: THREE.DoubleSide
+    });
+    const ripple = new THREE.Mesh(this.rippleGeo, material);
+    ripple.rotation.x = -Math.PI / 2;
+    ripple.position.set(x, surfaceY + 0.06, z);
+    ripple.renderOrder = 3;
+    ripple.userData.life = 0.9;
+    this.scene.add(ripple);
+    this.ripples.push(ripple);
+    if (this.ripples.length > 48) {
+      const old = this.ripples.shift();
+      this.scene.remove(old);
+      old.material.dispose();
+    }
+  }
+
   updateFeet(player, moving, running) {
     if (!player || !moving || !player.active) {
       this.stepCarry = 0;
@@ -164,12 +189,8 @@ export class GroundFx {
       return;
     }
     const p = player.position;
-    const surface = this.terrain.getSurfaceAt(p.x, p.z);
-    if (surface.kind === 'ocean' || surface.kind === 'river' || surface.kind === 'lake') {
-      this.stepCarry = 0;
-      this.lastStep = null;
-      return;
-    }
+    const water = this.terrain.waterAt(p.x, p.z);
+    const wet = water.depth > 0.05;
     if (!this.lastStep) {
       this.lastStep = { x: p.x, z: p.z };
       return;
@@ -182,10 +203,11 @@ export class GroundFx {
       return;
     }
     this.stepCarry += len;
-    const stride = running ? 1.15 : 0.78;
+    const stride = wet ? 0.62 : (running ? 1.15 : 0.78);
     if (this.stepCarry < stride) return;
     this.stepCarry -= stride;
-    this.stampFoot(player, this.footSide);
+    if (wet) this.spawnRipple(p.x, p.z, water.surface);
+    else this.stampFoot(player, this.footSide);
     this.footSide *= -1;
   }
 
@@ -251,6 +273,19 @@ export class GroundFx {
         this.scene.remove(print);
         print.material.dispose();
         this.prints.splice(i, 1);
+      }
+    }
+
+    for (let i = this.ripples.length - 1; i >= 0; i--) {
+      const ripple = this.ripples[i];
+      ripple.userData.life -= delta;
+      const age = 1 - ripple.userData.life / 0.9;
+      ripple.scale.setScalar(1 + age * 2.4);
+      ripple.material.opacity = Math.max(0, ripple.userData.life / 0.9) * 0.5;
+      if (ripple.userData.life <= 0) {
+        this.scene.remove(ripple);
+        ripple.material.dispose();
+        this.ripples.splice(i, 1);
       }
     }
 

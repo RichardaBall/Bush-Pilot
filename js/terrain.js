@@ -10,6 +10,11 @@ function lerp(a, b, t) {
   return a + (b - a) * t;
 }
 
+function smoothMax(a, b, k) {
+  const h = Math.min(1, Math.max(0, 0.5 + 0.5 * (b - a) / k));
+  return lerp(a, b, h) + k * h * (1 - h);
+}
+
 function mix3(a, b, t, out) {
   out[0] = a[0] + (b[0] - a[0]) * t;
   out[1] = a[1] + (b[1] - a[1]) * t;
@@ -220,6 +225,14 @@ float terrainNoise(vec2 p) {
 
 const foliageFocus = new THREE.Vector3();
 const foliageReveal = { value: 0 };
+const grassContact = {
+  player: new THREE.Vector3(1e5, 0, 1e5),
+  dir: new THREE.Vector2(0, 1),
+  wheels: new THREE.Vector4(1e5, 1e5, 1e5, 1e5),
+  wheelOn: { value: 0 },
+  time: { value: 0 },
+  active: { value: 0 }
+};
 
 function fadeNearCamera(material) {
   material.customProgramCacheKey = () => 'bush-foliage-clear';
@@ -253,21 +266,140 @@ uniform float foliageReveal;`)
   };
 }
 
-function createTerrainMaterial() {
+// Grass keeps the foliage fade and also leans away from whoever is walking through it.
+function bendGrass(material, spanY) {
+  const span = Math.max(0.2, spanY);
+  material.customProgramCacheKey = () => 'bush-grass-bend';
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.foliageFocus = { value: foliageFocus };
+    shader.uniforms.foliageReveal = foliageReveal;
+    shader.uniforms.grassPlayer = { value: grassContact.player };
+    shader.uniforms.grassDir = { value: grassContact.dir };
+    shader.uniforms.grassWheels = { value: grassContact.wheels };
+    shader.uniforms.grassWheelOn = grassContact.wheelOn;
+    shader.uniforms.grassTime = grassContact.time;
+    shader.uniforms.grassActive = grassContact.active;
+    shader.uniforms.grassSpan = { value: span };
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>
+varying vec3 vFoliageWorld;
+uniform vec3 grassPlayer;
+uniform vec2 grassDir;
+uniform vec4 grassWheels;
+uniform float grassWheelOn;
+uniform float grassTime;
+uniform float grassActive;
+uniform float grassSpan;`)
+      .replace('#include <project_vertex>', `
+vec4 grassWorld;
+#ifdef USE_INSTANCING
+  grassWorld = modelMatrix * instanceMatrix * vec4(transformed, 1.0);
+#else
+  grassWorld = modelMatrix * vec4(transformed, 1.0);
+#endif
+float grassTip = clamp(transformed.y / max(grassSpan, 0.001), 0.0, 1.0);
+grassTip *= grassTip;
+vec2 grassOffset = vec2(
+  sin(grassWorld.x * 0.73 + grassTime * 1.35 + grassWorld.z * 0.17),
+  cos(grassWorld.z * 0.69 - grassTime * 1.1)
+) * 0.05;
+if (grassActive > 0.5) {
+  vec2 away = grassWorld.xz - grassPlayer.xz;
+  float dist = length(away);
+  float reach = 1.0 - smoothstep(0.2, 1.6, dist);
+  if (dist > 0.0001) grassOffset += (away / dist) * reach * 0.7;
+  grassOffset += grassDir * reach * 0.28;
+}
+if (grassWheelOn > 0.5) {
+  vec2 left = grassWorld.xz - grassWheels.xy;
+  vec2 right = grassWorld.xz - grassWheels.zw;
+  float dl = length(left);
+  float dr = length(right);
+  float pl = 1.0 - smoothstep(0.25, 2.4, dl);
+  float pr = 1.0 - smoothstep(0.25, 2.4, dr);
+  if (dl > 0.0001) grassOffset += (left / dl) * pl * 0.4;
+  if (dr > 0.0001) grassOffset += (right / dr) * pr * 0.4;
+}
+grassWorld.x += grassOffset.x * grassTip;
+grassWorld.z += grassOffset.y * grassTip;
+vFoliageWorld = grassWorld.xyz;
+vec4 mvPosition = viewMatrix * grassWorld;
+gl_Position = projectionMatrix * mvPosition;`);
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+varying vec3 vFoliageWorld;
+uniform vec3 foliageFocus;
+uniform float foliageReveal;`)
+      .replace('#include <color_fragment>', `#include <color_fragment>
+        if (foliageReveal > 0.5 && vFoliageWorld.y > foliageFocus.y + 2.9) {
+          vec3 toCam = vFoliageWorld - cameraPosition;
+          if (dot(toCam, toCam) < 100.0) discard;
+          vec3 toPlayer = foliageFocus - cameraPosition;
+          float span = max(dot(toPlayer, toPlayer), 0.001);
+          float along = clamp(dot(toCam, toPlayer) / span, 0.0, 1.0);
+          vec3 closest = cameraPosition + toPlayer * along;
+          float sightRadius = mix(18.0, 8.0, along);
+          if (distance(vFoliageWorld, closest) < sightRadius) discard;
+        }`);
+  };
+}
+
+const COAST_GLSL = `
+uniform sampler2D uCoast;
+uniform float uCoastN;
+uniform vec3 uSpit[4];
+float coastAt(float ang) {
+  float u = (ang + 3.14159265) / 6.2831853;
+  float x = u * uCoastN;
+  float i0 = floor(x);
+  float f = x - i0;
+  float a = texelFetch(uCoast, ivec2(int(mod(i0, uCoastN)), 0), 0).r;
+  float b = texelFetch(uCoast, ivec2(int(mod(i0 + 1.0, uCoastN)), 0), 0).r;
+  return mix(a, b, f);
+}
+float spitInside(vec2 p) {
+  float best = -1e9;
+  for (int i = 0; i < 3; i++) {
+    vec2 a = uSpit[i].xy;
+    vec2 b = uSpit[i + 1].xy;
+    vec2 ab = b - a;
+    float len2 = dot(ab, ab);
+    float t = len2 > 1e-6 ? clamp(dot(p - a, ab) / len2, 0.0, 1.0) : 0.0;
+    float inside = mix(uSpit[i].z, uSpit[i + 1].z, t) - length(p - (a + ab * t));
+    best = max(best, inside);
+  }
+  return best;
+}
+float smoothMax(float a, float b, float k) {
+  float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(a, b, h) + k * h * (1.0 - h);
+}
+float shoreDistAt(vec2 p) {
+  float dist = length(p);
+  float ang = dist > 0.001 ? atan(p.y, p.x) : 0.0;
+  return smoothMax(coastAt(ang) - dist, spitInside(p), 12.0);
+}
+`;
+
+function createTerrainMaterial(coastLUT, spit) {
   const material = new THREE.MeshStandardMaterial({
     vertexColors: true,
     roughness: 0.9,
     metalness: 0
   });
-  material.customProgramCacheKey = () => 'bush-terrain-detail';
+  material.customProgramCacheKey = () => 'bush-terrain-coast3';
   material.onBeforeCompile = (shader) => {
+    shader.uniforms.uCoast = { value: coastLUT };
+    shader.uniforms.uCoastN = { value: coastLUT.image.width };
+    shader.uniforms.uSpit = { value: spit };
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec3 vTerrainWorld;\nvarying vec3 vTerrainNormal;')
       .replace('#include <beginnormal_vertex>', '#include <beginnormal_vertex>\nvTerrainNormal = normalize(mat3(modelMatrix) * objectNormal);')
       .replace('#include <project_vertex>', 'vTerrainWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\n#include <project_vertex>');
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>\nvarying vec3 vTerrainWorld;\nvarying vec3 vTerrainNormal;\n${TERRAIN_DETAIL}`)
+      .replace('#include <common>', `#include <common>\nvarying vec3 vTerrainWorld;\nvarying vec3 vTerrainNormal;\n${COAST_GLSL}\n${TERRAIN_DETAIL}`)
       .replace('#include <color_fragment>', `#include <color_fragment>
+        if (shoreDistAt(vTerrainWorld.xz) < 0.4) discard;
         vec2 xz = vTerrainWorld.xz;
         float fine = terrainNoise(xz * 1.8);
         float mid = terrainNoise(xz * 0.28);
@@ -295,10 +427,15 @@ export class Terrain {
   constructor(scene) {
     this.scene = scene;
     this.size = 900;
-    this.segments = 300;
+    this.segments = 480;
     this.step = this.size / this.segments;
     this.oceanTime = 0;
     this.canopy = [];
+    this.solids = [];
+    this.solidGrid = null;
+    this.solidCell = 16;
+    this._nearSolids = [];
+    this._resolved = { x: 0, z: 0 };
     this._info = {};
     this._color = [0, 0, 0];
     this.clearings = [];
@@ -310,6 +447,8 @@ export class Terrain {
       [156, 204, 15],
       [170, 246, 34]
     ];
+    this.spitVecs = this.spit.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
+    this.buildCoastLUT();
     this.profileRivers();
     this.placeLake();
 
@@ -364,6 +503,23 @@ export class Terrain {
   coastRadius(ang) {
     const east = Math.max(0, Math.cos(ang));
     return this.canopyRadius(ang) + 38 + east * east * 16;
+  }
+
+  buildCoastLUT() {
+    const n = 4096;
+    const data = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const ang = (i / n) * Math.PI * 2 - Math.PI;
+      data[i] = this.coastRadius(ang);
+    }
+    const tex = new THREE.DataTexture(data, n, 1, THREE.RedFormat, THREE.FloatType);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.minFilter = THREE.NearestFilter;
+    tex.magFilter = THREE.NearestFilter;
+    tex.colorSpace = THREE.LinearSRGBColorSpace;
+    tex.needsUpdate = true;
+    this.coastLUT = tex;
   }
 
   spitInside(x, z) {
@@ -546,11 +702,13 @@ export class Terrain {
     return { w: best, h: target };
   }
 
-  // Water plane sits at this height. Shore triangles that graze it flicker.
+  // A few meters of lip so shore triangles do not sit in the water plane.
+  // Farther out, the seabed from the coast profile is left alone.
   shoreGap(h, s) {
     const waterY = 0.12;
-    if (s < 10) return Math.min(h, waterY - 0.7);
-    if (s < 80 && h < waterY + 0.5) return waterY + 0.58;
+    if (h > waterY - 0.45 && h < waterY + 0.32) {
+      return s >= 1 ? waterY + 0.36 : Math.min(h, waterY - 0.45);
+    }
     return h;
   }
 
@@ -633,7 +791,7 @@ export class Terrain {
     const ang = dist > 0.001 ? Math.atan2(z, x) : 0;
     const canopyDist = this.canopyRadius(ang) - dist;
     const spit = this.spitInside(x, z);
-    const shoreDist = Math.max(this.coastRadius(ang) - dist, spit);
+    const shoreDist = smoothMax(this.coastRadius(ang) - dist, spit, 12);
 
     info.shoreDist = shoreDist;
     info.canopyDist = canopyDist;
@@ -650,12 +808,18 @@ export class Terrain {
 
     let h;
     if (shoreDist < -70) {
-      h = Math.max(-20, -1.6 + (shoreDist + 70) * 0.18);
-    } else if (shoreDist < -1) {
-      h = lerp(-1.45, -0.55, smoother(-68, -2, shoreDist));
+      const lip = -0.25 + (-70) * 0.16;
+      h = Math.max(-24, lip + (shoreDist + 70) * 0.22);
     } else if (canopyDist < 1) {
-      h = lerp(0.78, 1.22, smoother(0, 34, shoreDist));
-      h += (this.fbm(x * 0.08, z * 0.08, 2) - 0.5) * 0.08;
+      if (shoreDist > 4) {
+        h = lerp(0.42, 1.16, smoother(4, 30, shoreDist));
+        if (shoreDist > 12) h += (this.fbm(x * 0.08, z * 0.08, 2) - 0.5) * 0.08;
+      } else {
+        const seabed = Math.max(-14, -0.25 + shoreDist * 0.16 + (this.fbm(x * 0.02, z * 0.02, 2) - 0.5) * 0.35);
+        const u = smoother(4, -16, shoreDist);
+        h = lerp(0.42, seabed, u);
+        if (h > 0.0 && h < 0.22) h = u < 0.35 ? 0.3 : Math.min(h, -0.22);
+      }
     } else {
       h = lerp(1.15, this.inlandHeight(x, z), smoother(0, 16, canopyDist));
     }
@@ -719,6 +883,143 @@ export class Terrain {
       canopyDist: info.canopyDist,
       onSpit: info.onSpit
     };
+  }
+
+  // Surface of the water the player can wade, or a dry bed when the ground is above it.
+  waterAt(x, z) {
+    const bed = this.getHeightAt(x, z);
+    this.computeHeight(x, z);
+    const info = this._info;
+    let surface = -1e9;
+    let kind = 'land';
+    const oceanY = 0.05;
+    if (info.shoreDist < 8 && bed < oceanY + 0.08) {
+      surface = oceanY;
+      kind = 'ocean';
+    }
+    if (this.lake && info.lakeE < 0.98) {
+      const level = this.lake.level + 0.12;
+      if (bed < level - 0.02) {
+        surface = level;
+        kind = 'lake';
+      }
+    }
+    if (info.riverIndex >= 0 && info.riverDist < 18) {
+      const level = this.riverWater(this.rivers[info.riverIndex], info.riverT);
+      if (bed < level - 0.02 && level > surface) {
+        surface = level;
+        kind = 'river';
+      }
+    }
+    const depth = surface > -1000 ? Math.max(0, surface - bed) : 0;
+    if (depth < 0.05) return { bed, surface: bed, depth: 0, kind: 'land' };
+    return { bed, surface, depth, kind };
+  }
+
+  noteSolid(x, z, r, top) {
+    if (!(r > 0.15)) return;
+    this.solids.push({ x, z, r, top });
+  }
+
+  buildSolidGrid() {
+    const cell = this.solidCell;
+    const grid = new Map();
+    const solids = this.solids;
+    for (let i = 0; i < solids.length; i++) {
+      const s = solids[i];
+      const key = (Math.floor(s.x / cell) + 512) * 1024 + (Math.floor(s.z / cell) + 512);
+      let list = grid.get(key);
+      if (!list) {
+        list = [];
+        grid.set(key, list);
+      }
+      list.push(s);
+    }
+    this.solidGrid = grid;
+  }
+
+  solidsNear(x, z, reach) {
+    const out = this._nearSolids;
+    out.length = 0;
+    if (!this.solidGrid) return out;
+    const cell = this.solidCell;
+    const minX = Math.floor((x - reach) / cell);
+    const maxX = Math.floor((x + reach) / cell);
+    const minZ = Math.floor((z - reach) / cell);
+    const maxZ = Math.floor((z + reach) / cell);
+    for (let iz = minZ; iz <= maxZ; iz++) {
+      for (let ix = minX; ix <= maxX; ix++) {
+        const list = this.solidGrid.get((ix + 512) * 1024 + (iz + 512));
+        if (!list) continue;
+        for (let i = 0; i < list.length; i++) out.push(list[i]);
+      }
+    }
+    return out;
+  }
+
+  hitsSolid(x, z, body) {
+    const near = this.solidsNear(x, z, body + 18);
+    for (let i = 0; i < near.length; i++) {
+      const s = near[i];
+      const dx = x - s.x;
+      const dz = z - s.z;
+      const min = s.r + body;
+      if (dx * dx + dz * dz < min * min) return true;
+    }
+    return false;
+  }
+
+  // Push a point out of trunks and rocks so a walk can slide along them.
+  resolveSolid(x, z, body) {
+    const near = this.solidsNear(x, z, body + 18);
+    for (let pass = 0; pass < 2; pass++) {
+      for (let i = 0; i < near.length; i++) {
+        const s = near[i];
+        const dx = x - s.x;
+        const dz = z - s.z;
+        const min = s.r + body;
+        const d2 = dx * dx + dz * dz;
+        if (d2 >= min * min) continue;
+        const d = Math.sqrt(d2) || 0.0001;
+        const push = (min - d) / d;
+        x += dx * push;
+        z += dz * push;
+      }
+    }
+    this._resolved.x = x;
+    this._resolved.z = z;
+    return this._resolved;
+  }
+
+  // Nose and main wheels. True when the Cub would drive into a solid or into water.
+  blocksTaxi(x, z, heading) {
+    const sin = Math.sin(heading);
+    const cos = Math.cos(heading);
+    const spots = [
+      [0, 2.35, 0.55],
+      [-0.85, 1.55, 0.4],
+      [0.85, 1.55, 0.4]
+    ];
+    for (let i = 0; i < spots.length; i++) {
+      const lx = spots[i][0];
+      const lz = spots[i][1];
+      const px = x + lx * cos + lz * sin;
+      const pz = z - lx * sin + lz * cos;
+      if (this.hitsSolid(px, pz, spots[i][2])) return true;
+      if (this.waterAt(px, pz).depth > 0.3) return true;
+    }
+    return false;
+  }
+
+  setGrassContact(x, y, z, dirX, dirZ, active, lx, lz, rx, rz, wheelsOn) {
+    if (active) grassContact.player.set(x, y, z);
+    else grassContact.player.set(1e5, 0, 1e5);
+    const len = Math.hypot(dirX, dirZ);
+    if (len > 0.001) grassContact.dir.set(dirX / len, dirZ / len);
+    else grassContact.dir.set(0, 0);
+    grassContact.active.value = active ? 1 : 0;
+    grassContact.wheels.set(lx, lz, rx, rz);
+    grassContact.wheelOn.value = wheelsOn ? 1 : 0;
   }
 
   isLandable(x, z) {
@@ -859,7 +1160,7 @@ export class Terrain {
     geometry.computeBoundingSphere();
     geometry.computeBoundingBox();
 
-    const terrainMaterial = createTerrainMaterial();
+    const terrainMaterial = createTerrainMaterial(this.coastLUT, this.spitVecs);
 
     this.mesh = new THREE.Mesh(geometry, terrainMaterial);
     this.mesh.receiveShadow = true;
@@ -1001,13 +1302,64 @@ export class Terrain {
     return water;
   }
 
+  loadWaterTextures() {
+    const loader = new THREE.TextureLoader();
+    const files = {
+      map: ['Base_Color', true],
+      normalMap: ['Normal', false],
+      roughnessMap: ['Roughness', false],
+      aoMap: ['Ambient_Occlusion', false],
+      emissiveMap: ['Emissive', true]
+    };
+    const maps = {};
+    for (const key of Object.keys(files)) {
+      const [name, srgb] = files[key];
+      const tex = loader.load(`./water/Vol_36_5_${name}.png`);
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(3000, 3000);
+      tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.LinearSRGBColorSpace;
+      maps[key] = tex;
+    }
+    this.waterMaps = maps;
+    return maps;
+  }
+
   initOcean() {
     const geo = new THREE.PlaneGeometry(36000, 36000, 1, 1);
-    this.ocean = this.makeWater(geo, 0.045, 2.6);
-    this.ocean.material.uniforms.alpha.value = 1;
-    this.ocean.material.transparent = false;
-    this.ocean.material.depthWrite = true;
-    this.ocean.position.y = 0.12;
+    const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, fog: true });
+    mat.customProgramCacheKey = () => 'bush-lagoon';
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = { value: 0 };
+      shader.uniforms.uCoast = { value: this.coastLUT };
+      shader.uniforms.uCoastN = { value: this.coastLUT.image.width };
+      shader.uniforms.uSpit = { value: this.spitVecs };
+      this.oceanUniforms = shader.uniforms;
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nvarying vec3 vOceanWorld;')
+        .replace('#include <project_vertex>', 'vOceanWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\n#include <project_vertex>');
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>\nvarying vec3 vOceanWorld;\nuniform float uTime;\n${COAST_GLSL}`)
+        .replace('#include <color_fragment>', `
+          vec2 xz = vOceanWorld.xz;
+          float shore = shoreDistAt(xz);
+          float depth = clamp(-shore / 70.0, 0.0, 1.0);
+          vec3 col = mix(vec3(0.16, 0.62, 0.64), vec3(0.07, 0.40, 0.52), smoothstep(0.0, 0.4, depth));
+          col = mix(col, vec3(0.02, 0.20, 0.34), smoothstep(0.3, 1.0, depth));
+          float swell = sin(xz.x * 0.045 + uTime * 0.32) * sin(xz.y * 0.037 - uTime * 0.24);
+          float rip = sin(xz.x * 0.18 + xz.y * 0.14 + uTime * 0.9);
+          col += vec3(0.02, 0.05, 0.045) * swell * (1.0 - depth * 0.35);
+          col += vec3(0.08, 0.16, 0.14) * smoothstep(0.72, 1.0, rip) * (1.0 - depth);
+          float foam = smoothstep(-7.0, -2.2, shore) * smoothstep(0.3, -1.2, shore);
+          foam *= 0.55 + 0.45 * sin(shore * 1.3 - uTime * 1.6);
+          col = mix(col, vec3(0.82, 0.94, 0.92), clamp(foam, 0.0, 0.55));
+          diffuseColor.rgb = col;`);
+    };
+    this.ocean = new THREE.Mesh(geo, mat);
+    this.ocean.rotation.x = -Math.PI / 2;
+    this.ocean.position.y = 0.05;
+    this.ocean.receiveShadow = false;
+    this.ocean.renderOrder = 2;
     this.scene.add(this.ocean);
     this.initLake();
   }
@@ -1064,7 +1416,8 @@ export class Terrain {
         material.depthWrite = true;
         material.side = THREE.DoubleSide;
       }
-      if (/tree|palm|banana|jungle|plant|flower|bush|grass|pineapple|coconut/i.test(root.name)) {
+      const grassy = /^grass/i.test(root.name || '');
+      if (!grassy && /tree|palm|banana|jungle|plant|flower|bush|pineapple|coconut/i.test(root.name)) {
         fadeNearCamera(material);
       }
       parts.push({ geometry, material });
@@ -1098,6 +1451,10 @@ export class Terrain {
         part.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
         part.material.vertexColors = true;
       }
+    }
+    if (/^grass/i.test(root.name || '')) {
+      const span = Math.max(0.2, box.max.y - box.min.y);
+      for (const part of parts) bendGrass(part.material, span);
     }
     return {
       name: root.name,
@@ -1180,12 +1537,19 @@ export class Terrain {
         }
         if (options.apart) options.apart.sites.push({ x, z });
         if (options.canopy) {
+          const top = dummy.position.y + prop.spanY * dummy.scale.y;
           this.canopy.push({
             x,
             z,
             r: Math.max(prop.spanX, prop.spanZ) * scale * 0.46,
-            top: dummy.position.y + prop.spanY * dummy.scale.y
+            top
           });
+          const trunkR = THREE.MathUtils.clamp(0.28 * scale, 0.45, 0.7);
+          this.noteSolid(x, z, trunkR, top);
+        }
+        if (options.solid) {
+          const foot = Math.max(prop.spanX, prop.spanZ) * Math.max(dummy.scale.x, dummy.scale.z);
+          this.noteSolid(x, z, Math.max(0.4, foot * 0.25), dummy.position.y + prop.spanY * dummy.scale.y);
         }
         placed++;
       }
@@ -1247,6 +1611,7 @@ export class Terrain {
     ]) {
       plant(name, 3, 160, (s, x, z, r) => stoneHere(s, x, z, r), {
         tries: 30,
+        solid: true,
         color: stoneColor,
         sink: (scale) => scale * 0.18,
         orient: (obj, _s, _x, _z, r) => {
@@ -1294,6 +1659,7 @@ export class Terrain {
     const ledgeSites = [];
     const ledgeOpts = {
       tries: 28,
+      solid: true,
       color: rockTint,
       orient: (obj, _s, x, z, r, prop) => {
         const e = 12;
@@ -1315,6 +1681,7 @@ export class Terrain {
     }
 
     if (!packs.grass) this.addGrass(rng, dummy);
+    this.buildSolidGrid();
   }
 
   initProps() {
@@ -1358,12 +1725,16 @@ export class Terrain {
         coniferColor.setRGB(0.1 + rng() * 0.06, 0.28 + rng() * 0.12, 0.08);
         coniferCrown.setColorAt(conifers, coniferColor);
         conifers++;
+        this.noteSolid(x, z, Math.min(0.7, Math.max(0.45, 0.32 * scale)), surface.height + 3.1 * dummy.scale.y);
+        this.canopy.push({ x, z, r: 1.8 * scale, top: surface.height + 6.2 * scale });
       } else if (broads < broadCount) {
         broadTrunk.setMatrixAt(broads, dummy.matrix);
         broadCrown.setMatrixAt(broads, dummy.matrix);
         broadColor.setRGB(0.18 + rng() * 0.1, 0.36 + rng() * 0.12, 0.1);
         broadCrown.setColorAt(broads, broadColor);
         broads++;
+        this.noteSolid(x, z, Math.min(0.7, Math.max(0.45, 0.32 * scale)), surface.height + 2.4 * dummy.scale.y);
+        this.canopy.push({ x, z, r: 1.8 * scale, top: surface.height + 5.4 * scale });
       }
     }
     coniferTrunk.count = conifers;
@@ -1399,12 +1770,14 @@ export class Terrain {
       const g = 0.38 + rng() * 0.22;
       rockColor.setRGB(g, g * 0.97, g * 0.92);
       rocks.setColorAt(rockN, rockColor);
+      this.noteSolid(x, z, Math.max(0.4, scale * 0.5), surface.height + dummy.scale.y);
       rockN++;
     }
     rocks.count = rockN;
     if (rocks.instanceColor) rocks.instanceColor.needsUpdate = true;
     this.finishInstances(rocks);
     this.addGrass(rng, dummy);
+    this.buildSolidGrid();
   }
 
   addGrass(rng, dummy) {
@@ -1416,7 +1789,7 @@ export class Terrain {
       alphaTest: 0.28,
       side: THREE.DoubleSide
     });
-    fadeNearCamera(grassMat);
+    bendGrass(grassMat, 1.35);
     const grassCount = 6500;
     const grass = new THREE.InstancedMesh(grassGeo, grassMat, grassCount);
     const grassColor = new THREE.Color();
@@ -1644,7 +2017,7 @@ export class Terrain {
     return this._ceiling;
   }
 
-  // True when the fuselage is inside a canopy. Height is left to the throttle.
+  // True when the fuselage is inside a crown or a trunk.
   blocksFlight(x, z, y) {
     const canopy = this.canopy;
     for (let i = 0; i < canopy.length; i++) {
@@ -1654,6 +2027,15 @@ export class Terrain {
       const dz = tree.z - z;
       if (dx * dx + dz * dz > tree.r * tree.r) continue;
       if (y > tree.top - 24) return true;
+    }
+    const near = this.solidsNear(x, z, 16);
+    for (let i = 0; i < near.length; i++) {
+      const solid = near[i];
+      if (y >= solid.top) continue;
+      const dx = solid.x - x;
+      const dz = solid.z - z;
+      const reach = solid.r + 1.15;
+      if (dx * dx + dz * dz < reach * reach) return true;
     }
     return false;
   }
@@ -1702,9 +2084,8 @@ export class Terrain {
       foliageReveal.value = reveal ? 1 : 0;
     }
     this.oceanTime += delta;
-    if (this.ocean && this.ocean.material.uniforms.time) {
-      this.ocean.material.uniforms.time.value = this.oceanTime;
-    }
+    grassContact.time.value = this.oceanTime;
+    if (this.oceanUniforms) this.oceanUniforms.uTime.value = this.oceanTime;
     if (this.lakeMesh && this.lakeMesh.material.uniforms.time) {
       this.lakeMesh.material.uniforms.time.value = this.oceanTime;
     }

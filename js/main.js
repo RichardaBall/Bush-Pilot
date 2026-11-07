@@ -309,9 +309,16 @@ class Game {
     const inPlane = this.mode === 'IN_AIRCRAFT';
     const targetPos = inPlane ? this.aircraft.position : this.player.position;
 
+    const zoom = inPlane ? 0 : (this.walkZoom || 0);
+    const near = !inPlane && zoom > 0.55 ? 0.25 : 1.5;
+    if (this.camera.near !== near) {
+      this.camera.near = near;
+      this.camera.updateProjectionMatrix();
+    }
+
     if (inPlane) {
       this.planeLookIdle += delta;
-      if (this.planeLookIdle > 0.45) {
+      if (this.planeLookIdle > 3.5) {
         const settle = 1 - Math.exp(-1.6 * delta);
         this.planeLookYaw = THREE.MathUtils.lerp(this.planeLookYaw, 0, settle);
         this.planeLookPitch = THREE.MathUtils.lerp(this.planeLookPitch, 0, settle);
@@ -335,7 +342,6 @@ class Game {
     }
 
     const yaw = this.player.mesh.rotation.y;
-    const zoom = this.walkZoom || 0;
     const back = 20 + (0.28 - 20) * zoom;
     const height = 24 + (1.62 - 24) * zoom;
     const ahead = 6 + (12 - 6) * zoom;
@@ -359,6 +365,11 @@ class Game {
         Math.cos(yaw) * Math.cos(pitch)
       ).multiplyScalar(12));
       look.lerp(pitched, pitchBlend);
+    }
+    if (this.player.inWater) {
+      const floorY = this.player.waterSurface + 0.6;
+      if (this.camera.position.y < floorY) this.camera.position.y = floorY;
+      if (look.y < this.player.waterSurface + 0.25) look.y = this.player.waterSurface + 0.25;
     }
     this.camera.lookAt(look);
     if (this.player.active) this.player.mesh.visible = zoom < 0.72;
@@ -449,6 +460,29 @@ class Game {
       const groundY = this.terrain.getHeightAt(this.aircraft.position.x, this.aircraft.position.z);
       const rolling = this.mode === 'IN_AIRCRAFT' && this.aircraft.position.y - groundY < 1.6;
       this.groundFx.update(delta, this.aircraft, rolling, this.camera);
+      const heading = this.aircraft.heading;
+      const sin = Math.sin(heading);
+      const cos = Math.cos(heading);
+      const ax = this.aircraft.position.x;
+      const az = this.aircraft.position.z;
+      const lx = rolling ? ax + -0.85 * cos + 1.55 * sin : 1e5;
+      const lz = rolling ? az - -0.85 * sin + 1.55 * cos : 1e5;
+      const rx = rolling ? ax + 0.85 * cos + 1.55 * sin : 1e5;
+      const rz = rolling ? az - 0.85 * sin + 1.55 * cos : 1e5;
+      const dir = this.player.moveDir;
+      this.terrain.setGrassContact(
+        this.player.position.x,
+        this.player.position.y,
+        this.player.position.z,
+        dir ? dir.x : 0,
+        dir ? dir.z : 0,
+        onFoot,
+        lx,
+        lz,
+        rx,
+        rz,
+        rolling
+      );
     }
 
     if (this.mode === 'IN_AIRCRAFT' && this.aircraft) {

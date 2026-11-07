@@ -49,9 +49,7 @@ export class TaxiManager {
 
     // Keep locked firmly to ground terrain
     const groundH = this.terrain.getHeightAt(aircraft.position.x, aircraft.position.z);
-    const braking = keys['ArrowDown'] || keys['KeyS'];
-    const noseOver = ground.soft && braking && aircraft.speed > 6;
-    aircraft.pitch = noseOver ? 0.16 : Aircraft.TAIL_DOWN_PITCH;
+    aircraft.pitch = Aircraft.TAIL_DOWN_PITCH;
     aircraft.position.y = groundH + aircraft.groundOffset(aircraft.pitch);
     aircraft.roll = 0;
 

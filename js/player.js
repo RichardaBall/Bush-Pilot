@@ -12,6 +12,10 @@ export class Player {
     this.speed = 8;
     this.walkCycleTime = 0;
     this.lookPitch = 0;
+    this.moveDir = new THREE.Vector3();
+    this.inWater = false;
+    this.swimming = false;
+    this.waterSurface = 0;
 
     this.mesh.position.copy(this.position);
     this.scene.add(this.mesh);
@@ -52,6 +56,26 @@ export class Player {
     this.lookPitch = THREE.MathUtils.clamp(this.lookPitch + pixels * 0.0022, -1.15, 1.2);
   }
 
+  waterPace(depth) {
+    if (depth > 1.2) return 0.4;
+    if (depth > 0.45) return THREE.MathUtils.lerp(0.55, 0.35, (depth - 0.45) / 0.75);
+    if (depth > 0.08) return THREE.MathUtils.lerp(1, 0.55, (depth - 0.08) / 0.37);
+    return 1;
+  }
+
+  placeFeet() {
+    const slid = this.terrain.resolveSolid(this.position.x, this.position.z, 0.45);
+    this.position.x = slid.x;
+    this.position.z = slid.z;
+    const water = this.terrain.waterAt(this.position.x, this.position.z);
+    this.inWater = water.depth > 0.08;
+    this.swimming = water.depth > 1.2;
+    this.waterSurface = water.depth > 0 ? water.surface : water.bed;
+    if (this.swimming) this.position.y = water.surface - 1.05;
+    else this.position.y = water.bed;
+    this.mesh.position.copy(this.position);
+  }
+
   update(delta, keys) {
     if (!this.active) return;
 
@@ -74,17 +98,17 @@ export class Player {
         0,
         cos * inputZ + sin * inputX
       ).normalize();
-      const running = keys['ShiftLeft'] || keys['ShiftRight'];
-      const pace = (this.pace || 1) * (running ? 1.85 : 1);
+      this.moveDir.copy(moveDir);
+      const water = this.terrain.waterAt(this.position.x, this.position.z);
+      const running = (keys['ShiftLeft'] || keys['ShiftRight']) && water.depth < 0.45;
+      const pace = (this.pace || 1) * (running ? 1.85 : 1) * this.waterPace(water.depth);
       this.position.addScaledVector(moveDir, this.speed * pace * delta);
-
-      const groundH = this.terrain.getHeightAt(this.position.x, this.position.z);
-      this.position.y = groundH;
-
-      this.mesh.position.copy(this.position);
-      this.setPose(running ? 'run' : 'walk');
+      this.placeFeet();
+      this.setPose(this.swimming ? 'walk' : (running ? 'run' : 'walk'));
     } else {
+      this.moveDir.set(0, 0, 0);
       this.walkCycleTime = 0;
+      this.placeFeet();
       this.setPose('idle');
       if (parts && parts.leftArmGroup) {
         parts.leftArmGroup.rotation.x = THREE.MathUtils.lerp(parts.leftArmGroup.rotation.x, 0, delta * 10);

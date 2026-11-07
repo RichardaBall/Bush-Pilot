@@ -128,6 +128,11 @@ export class Aircraft {
     const prevX = this.position.x;
     const prevZ = this.position.z;
     this.moveForward(delta);
+    if (!this.airborne && this.terrain.blocksTaxi(this.position.x, this.position.z, this.heading)) {
+      this.position.x = prevX;
+      this.position.z = prevZ;
+      this.speed *= 0.4;
+    }
 
     const here = this.terrain.getHeightAt(this.position.x, this.position.z);
     const surface = Math.max(here, 0);
@@ -135,8 +140,7 @@ export class Aircraft {
 
     if (!this.airborne) {
       const tailUp = THREE.MathUtils.clamp((this.speed - specs.tailUp) / (specs.tailLevel - specs.tailUp), 0, 1);
-      const noseOver = roll.soft && down && this.speed > 6;
-      this.pitch = noseOver ? 0.16 : THREE.MathUtils.lerp(Aircraft.TAIL_DOWN_PITCH, 0, tailUp);
+      this.pitch = THREE.MathUtils.lerp(Aircraft.TAIL_DOWN_PITCH, 0, tailUp);
       this.position.y = here + this.groundOffset(this.pitch);
       const liftoff = specs.liftoff * (1 + (1 - roll.accel) * 0.35);
       if (!blocked && this.power > 0.62 && this.speed >= liftoff && tailUp > 0.85) this.airborne = true;
