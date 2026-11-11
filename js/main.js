@@ -7,9 +7,17 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { AssetLoader } from './loaders.js';
 import { Terrain } from './terrain.js';
 import { Player } from './player.js';
+import { Smurf } from './smurf.js';
 import { Aircraft } from './aircraft.js';
 import { FieldKit } from './fieldkit.js';
 import { GroundFx } from './groundfx.js';
+import { Soundscape } from './audio.js';
+import { Tent } from './tent.js';
+import { Campfire } from './campfire.js';
+import { SolarPanel } from './solar.js';
+import { WindTurbine } from './turbine.js';
+import { Lamp } from './lamp.js';
+import { TentPower } from './tentpower.js';
 
 class Game {
   constructor() {
@@ -18,6 +26,7 @@ class Game {
     this.uiState = document.getElementById('state-info');
     this.uiPrompt = document.getElementById('prompt-overlay');
     this.uiMeters = document.getElementById('meters');
+    this.uiBuild = document.getElementById('build-menu');
 
     this.mode = 'ON_FOOT'; // 'ON_FOOT' | 'IN_AIRCRAFT'
     this.aircraftState = 'PARKED'; // 'PARKED' | 'CRUISE' | 'TAKEOFF' | 'LANDING'
@@ -29,6 +38,11 @@ class Game {
     this.planeLookIdle = 0;
 
     this.sunOffset = new THREE.Vector3(210, 120, 60);
+    this.lightOffset = this.sunOffset.clone();
+    this.dayLength = 720;
+    this.dayTime = 90;
+    this.daylight = 1;
+    this.sunPitch = 0;
     this.initScene();
     this.initCamera();
     this.initLights();
@@ -37,6 +51,10 @@ class Game {
     this.initInputs();
 
     this.clock = new THREE.Clock();
+    this.audio = new Soundscape();
+    this.wasAirborne = false;
+    this.buildOpen = false;
+    this.buildIndex = 0;
     this.boot();
   }
 
@@ -67,9 +85,18 @@ class Game {
   initLights() {
     const hemi = new THREE.HemisphereLight(0xc5e4ee, 0x4a5340, 0.55);
     this.scene.add(hemi);
+    this.hemi = hemi;
+    this._dayHemi = new THREE.Color(0xc5e4ee);
+    this._nightHemi = new THREE.Color(0x1a2744);
 
     const ambientLight = new THREE.AmbientLight(0xfff1dd, 0.18);
     this.scene.add(ambientLight);
+    this.ambient = ambientLight;
+    this._dayAmbient = new THREE.Color(0xfff1dd);
+    this._nightAmbient = new THREE.Color(0x223044);
+    this._daySun = new THREE.Color(0xffd7a1);
+    this._duskSun = new THREE.Color(0xff7a3a);
+    this._moon = new THREE.Color(0x9eb6d8);
 
     const dirLight = new THREE.DirectionalLight(0xffd7a1, 2.6);
     dirLight.position.copy(this.sunOffset);
@@ -102,7 +129,8 @@ class Game {
         uSun: { value: sunDir },
         uZenith: { value: new THREE.Color(0x3c7ec4) },
         uHorizon: { value: new THREE.Color(0xd4e8f6) },
-        uWarm: { value: new THREE.Color(0xf0d2a8) }
+        uWarm: { value: new THREE.Color(0xf0d2a8) },
+        uDay: { value: 1 }
       },
       vertexShader: `
         varying vec3 vDir;
@@ -117,6 +145,7 @@ class Game {
         uniform vec3 uZenith;
         uniform vec3 uHorizon;
         uniform vec3 uWarm;
+        uniform float uDay;
         varying vec3 vDir;
         float skyHash(vec2 p) {
           p = fract(p * vec2(123.34, 345.45));
@@ -150,14 +179,32 @@ class Game {
           float glow = pow(max(dot(dir, uSun), 0.0), 8.0);
           col += vec3(1.6, 1.15, 0.7) * sun;
           col += uWarm * glow * 0.35;
+          float night = 1.0 - smoothstep(-0.18, 0.08, uSun.y);
+          float star = step(0.997, skyHash(floor(dir.xz * 500.0 + dir.y * 220.0)));
+          col += vec3(0.9, 0.93, 1.0) * star * night * smoothstep(0.0, 0.25, dir.y);
           vec2 cloudUv = dir.xz / max(dir.y, 0.08) * 0.35;
           float clouds = fbm(cloudUv);
           float cloudMask = smoothstep(0.52, 0.72, clouds) * smoothstep(0.08, 0.28, dir.y);
-          col = mix(col, vec3(0.96, 0.97, 0.98), cloudMask * 0.82);
+          vec3 cloudCol = mix(vec3(0.12, 0.15, 0.22), vec3(0.96, 0.97, 0.98), uDay);
+          col = mix(col, cloudCol, cloudMask * 0.82);
           gl_FragColor = vec4(col, 1.0);
         }
       `
     });
+    this.skyMat = material;
+    this._sunDir = sunDir;
+    this._dayZenith = new THREE.Color(0x3c7ec4);
+    this._duskZenith = new THREE.Color(0x1a2744);
+    this._nightZenith = new THREE.Color(0x070b18);
+    this._dayHorizon = new THREE.Color(0xd4e8f6);
+    this._duskHorizon = new THREE.Color(0xe08050);
+    this._nightHorizon = new THREE.Color(0x1a2438);
+    this._dayWarm = new THREE.Color(0xf0d2a8);
+    this._duskWarm = new THREE.Color(0xff7a3a);
+    this._nightWarm = new THREE.Color(0x1a2438);
+    this._zenith = new THREE.Color();
+    this._horizon = new THREE.Color();
+    this._warm = new THREE.Color();
     const sky = new THREE.Mesh(new THREE.SphereGeometry(8000, 32, 20), material);
     sky.frustumCulled = false;
     sky.renderOrder = -10;
@@ -200,6 +247,18 @@ class Game {
 
   initInputs() {
     window.addEventListener('keydown', (e) => {
+      this.audio.unlock();
+      if (e.code === 'Escape') {
+        this.buildOpen = false;
+        if (this.tent && this.tent.placing) this.tent.cancel();
+        if (this.fire && this.fire.placing) this.fire.cancel();
+        if (this.solar && this.solar.placing) this.solar.cancel();
+        if (this.solar && this.solar.cabling) this.solar.cancelCable();
+        if (this.turbine && this.turbine.placing) this.turbine.cancel();
+        if (this.turbine && this.turbine.cabling) this.turbine.cancelCable();
+        if (this.tentPower && this.tentPower.cabling) this.tentPower.cancelCable();
+        if (this.lamp && this.lamp.charging) this.lamp.stopCharge();
+      }
       if (!this.keys[e.code]) {
         this.keyJustPressed[e.code] = true;
       }
@@ -212,12 +271,50 @@ class Game {
     });
 
     this.walkZoom = 0;
-    this.canvas.addEventListener('click', () => {
-      this.canvas.requestPointerLock();
+    this.canvas.addEventListener('mousedown', (e) => {
+      this.audio.unlock();
+      if (e.button === 1) {
+        e.preventDefault();
+        this.onMiddleClick();
+        return;
+      }
+      if (e.button !== 0) return;
+      if (document.pointerLockElement !== this.canvas) {
+        this.canvas.requestPointerLock();
+        return;
+      }
+      this.onLeftClick();
+    });
+    this.canvas.addEventListener('auxclick', (e) => {
+      if (e.button === 1) e.preventDefault();
     });
     this.canvas.addEventListener('wheel', (e) => {
       if (this.mode !== 'ON_FOOT') return;
       e.preventDefault();
+      if (this.tent && this.tent.placing) {
+        this.tent.rotate(e.deltaY);
+        return;
+      }
+      if (this.fire && this.fire.placing) {
+        this.fire.rotate(e.deltaY);
+        return;
+      }
+      if (this.solar && this.solar.placing) {
+        this.solar.rotate(e.deltaY);
+        return;
+      }
+      if (this.turbine && this.turbine.placing) {
+        this.turbine.rotate(e.deltaY);
+        return;
+      }
+      if (this.buildOpen) {
+        const lines = this.campLines();
+        if (lines.length) {
+          const step = e.deltaY > 0 ? 1 : -1;
+          this.buildIndex = (this.buildIndex + step + lines.length) % lines.length;
+        }
+        return;
+      }
       const step = Math.sign(e.deltaY) * 0.1;
       this.walkZoom = Math.min(1, Math.max(0, this.walkZoom - step));
     }, { passive: false });
@@ -225,7 +322,15 @@ class Game {
       if (document.pointerLockElement !== this.canvas) return;
       if (this.mode === 'ON_FOOT' && this.player) {
         this.player.look(e.movementX);
-        this.player.lookUp(e.movementY);
+        const placingItem = this.tent && this.tent.placing
+          ? this.tent
+          : (this.fire && this.fire.placing
+            ? this.fire
+            : (this.solar && this.solar.placing
+              ? this.solar
+              : (this.turbine && this.turbine.placing ? this.turbine : null)));
+        if (placingItem) placingItem.nudgeReach(e.movementY);
+        else this.player.lookUp(e.movementY);
       } else if (this.mode === 'IN_AIRCRAFT') {
         this.planeLookYaw -= e.movementX * 0.0022;
         this.planeLookPitch = THREE.MathUtils.clamp(this.planeLookPitch + e.movementY * 0.0018, -0.5, 0.7);
@@ -249,9 +354,17 @@ class Game {
     if (natureScene) this.terrain.scatterNature(natureScene, packs);
     else this.terrain.initProps();
     this.terrain.scatterClouds(cloudScene);
-    const humanMesh = await loader.loadHuman().catch(() => loader.createHumanAvatar());
+    const [humanMesh, smurfMesh, campMesh] = await Promise.all([
+      loader.loadHuman().catch(() => loader.createHumanAvatar()),
+      loader.loadSmurf().catch((err) => {
+        console.warn('Smurf failed to load', err);
+        return null;
+      }),
+      loader.loadCamp()
+    ]);
 
     this.player = new Player(this.scene, this.terrain, humanMesh);
+    this.smurf = smurfMesh ? new Smurf(this.scene, this.terrain, smurfMesh) : null;
     this.aircraft = new Aircraft(this.scene, this.terrain, piperMesh);
     const camTarget = this.player.position;
     const yaw = this.player.mesh.rotation.y;
@@ -261,8 +374,15 @@ class Game {
       camTarget.z - Math.cos(yaw) * 20
     );
     this.camera.lookAt(camTarget.x, camTarget.y + 0.8, camTarget.z);
-    this.field = new FieldKit(this.scene, this.terrain, this.aircraft);
+    this.tent = campMesh ? new Tent(this.scene, this.terrain, campMesh) : null;
+    this.fire = new Campfire(this.scene, this.terrain);
+    this.solar = new SolarPanel(this.scene, this.terrain, this.aircraft);
+    this.lamp = new Lamp(this.scene, this.player, this.aircraft);
+    this.tentPower = this.tent ? new TentPower(this.scene, this.tent, this.aircraft) : null;
+    this.turbine = new WindTurbine(this.scene, this.terrain, this.aircraft, this.tent, this.tentPower);
+    this.field = new FieldKit(this.terrain, this.aircraft);
     this.groundFx = new GroundFx(this.scene, this.terrain);
+    this.groundFx.audio = this.audio;
     this.groundShadow = this.createGroundShadow();
     this.animate();
   }
@@ -377,40 +497,112 @@ class Game {
 
   handleStateTransitions() {
     const dist = this.player.position.distanceTo(this.aircraft.position);
+    const panelOut = this.solar && this.solar.blocksPower;
+    const turbineOut = this.turbine && this.turbine.blocksPower;
+    const gearOut = panelOut || turbineOut;
+    const packPrompt = (cockpit) => {
+      const key = cockpit ? ' [G]' : '';
+      if (panelOut && turbineOut) return `Pack the solar panel and the wind turbine${key} before adding power`;
+      if (turbineOut) return `Pack the wind turbine${key} before adding power`;
+      return `Pack the solar panel${key} before adding power`;
+    };
 
     if (this.mode === 'ON_FOOT') {
+      const placing = (this.tent && this.tent.placing) || (this.fire && this.fire.placing) || (this.solar && this.solar.placing) || (this.turbine && this.turbine.placing);
       const parked = this.aircraftState === 'PARKED';
       const nearPlane = parked && dist < 8;
       const atWater = this.field.waterNearby(this.player.position);
-      if (dist < 4.5 && parked) {
+      if (this.lamp && !placing && !this.buildOpen && !this.lamp.charging && this.keyJustPressed['KeyL']) {
+        if (this.lamp.toggle()) this.audio.click();
+      }
+      if (placing) {
+        // Prompt is written after the ghost is aimed.
+      } else if (this.solar && this.solar.cabling) {
+        this.uiPrompt.innerText = this.solar.inPlugRange(this.player)
+          ? 'Click to plug the cable into the fuselage'
+          : 'Walk the cable to the fuselage and click to plug it in';
+      } else if (this.tentPower && this.tentPower.cabling) {
+        this.uiPrompt.innerText = this.tentPower.inPlugRange(this.player)
+          ? 'Click to plug the tent cable into the fuselage'
+          : 'Walk the cable to the fuselage and click to plug it in';
+      } else if (this.turbine && this.turbine.cabling) {
+        const atPlug = this.turbine.inPlugRange(this.player);
+        this.uiPrompt.innerText = this.turbine.target === 'tent'
+          ? (atPlug ? 'Click to plug the cable into the tent' : 'Walk the cable to the tent and click to plug it in')
+          : (atPlug ? 'Click to plug the cable into the fuselage' : 'Walk the cable to the fuselage and click to plug it in');
+      } else if (this.lamp && this.lamp.charging) {
+        this.uiPrompt.innerText = 'Charging the lamp. Middle mouse cancels.';
+      } else if (this.fire && this.fire.near(this.player) && this.tent && this.tent.nearPlaced(this.player)) {
+        this.uiPrompt.innerText = 'Middle mouse for the tent and campfire';
+      } else if (this.fire && this.fire.near(this.player)) {
+        this.uiPrompt.innerText = this.fire.lit
+          ? 'Middle mouse to put the fire out or pack it'
+          : 'Middle mouse to light or pack the campfire';
+      } else if (this.tent && this.tent.nearPlaced(this.player)) {
+        const power = this.tentPower;
+        this.uiPrompt.innerText = power && power.reason
+          ? power.reason
+          : (power && power.connected
+            ? 'Middle mouse to unplug the tent or pack it'
+            : 'Middle mouse to run a cable or pack the tent');
+      } else if (this.solar && this.solar.near(this.player)) {
+        const spot = this.solar.spot();
+        this.uiPrompt.innerText = this.solar.connected
+          ? `${this.field.sunLabel(spot.x, spot.z)}. Middle mouse to unplug or pack the panel`
+          : 'Middle mouse to run a cable or pack the solar panel';
+      } else if (this.turbine && this.turbine.near(this.player)) {
+        if (this.turbine.connected) {
+          const spot = this.turbine.spot();
+          const label = this.field.windLabel(spot.x, spot.z);
+          const charging = this.turbine.target === 'tent' && this.tentPower && this.tentPower.connected;
+          this.uiPrompt.innerText = this.turbine.target === 'tent'
+            ? (charging
+              ? `${label}. Plugged into the tent and charging the plane. Middle mouse to unplug or pack the turbine`
+              : `${label}. Plugged into the tent. Middle mouse to unplug or pack the turbine`)
+            : `${label}. Middle mouse to unplug or pack the turbine`;
+        } else {
+          this.uiPrompt.innerText = 'Middle mouse to run a cable or pack the wind turbine';
+        }
+      } else if (dist < 4.5 && parked) {
         this.uiPrompt.innerText = 'Press [E] to Enter Aircraft';
         if (this.keyJustPressed['KeyE']) {
+          this.audio.click();
           this.mode = 'IN_AIRCRAFT';
           this.planeLookYaw = 0;
           this.planeLookPitch = 0;
           this.planeLookIdle = 1;
           this.player.setActive(false);
           this.aircraft.airborne = false;
+          this.buildOpen = false;
           this.uiPrompt.innerText = '';
         }
       } else if (atWater) {
         this.uiPrompt.innerText = 'Press [F] to collect water';
-      } else if (nearPlane) {
-        this.uiPrompt.innerText = this.field.panelOut
-          ? `${this.field.sunLabel()}. Press [G] to stow the panel`
-          : 'Press [G] to lay out the solar panel';
+      } else if (nearPlane && gearOut) {
+        this.uiPrompt.innerText = packPrompt(false);
+      } else if (this.lamp && this.lamp.charge <= 0) {
+        this.uiPrompt.innerText = 'Lamp is flat. Charge it at the plane.';
+      } else if (this.lamp && !this.lamp.lit && this.daylight < 0.45) {
+        this.uiPrompt.innerText = 'L lamp';
       } else {
         this.uiPrompt.innerText = '';
       }
-      if (atWater && this.keyJustPressed['KeyF']) this.field.collectWater();
-      if (nearPlane && this.keyJustPressed['KeyG']) this.field.togglePanel();
+      if (!placing && atWater && this.keyJustPressed['KeyF']) {
+        this.field.collectWater();
+        this.audio.pour();
+      }
     } else if (this.mode === 'IN_AIRCRAFT') {
       if (this.aircraftState === 'PARKED') {
-        this.uiPrompt.innerText = this.field.panelOut
-          ? 'Stow the solar panel [G] before adding power'
+        this.uiPrompt.innerText = gearOut
+          ? packPrompt(true)
           : 'Hold [W] to add power and take off. [S] reduces power. [E] Exit';
-        if (this.keyJustPressed['KeyG'] && this.field.panelOut) this.field.togglePanel();
+        if (this.keyJustPressed['KeyG'] && gearOut) {
+          if (panelOut && this.solar) this.solar.pack();
+          if (turbineOut && this.turbine) this.turbine.pack();
+          this.audio.flap();
+        }
         if (this.keyJustPressed['KeyE']) {
+          this.audio.click();
           this.mode = 'ON_FOOT';
           this.player.position.copy(this.aircraft.position).add(new THREE.Vector3(3, 0, 0));
           this.player.setActive(true);
@@ -425,13 +617,18 @@ class Game {
 
     const charge = Math.round(this.aircraft.charge);
     const load = Math.round(this.aircraft.cargo);
-    this.uiState.innerText = `State: ${this.mode} | Aircraft: ${this.aircraftState} | Charge ${charge}% | Load ${load} kg`;
+    this.uiState.innerText = `State: ${this.mode} | Aircraft: ${this.aircraftState} | Charge ${charge}% | Load ${load} kg | ${this.timeLabel()}`;
     this.uiControls.innerText = this.mode === 'ON_FOOT'
-      ? 'Click to look. Mouse looks. Scroll zooms. W forward, S back, A/D strafe, Shift runs. [E] Aircraft  [F] Water  [G] Panel'
+      ? 'Click to look. Mouse looks. Scroll zooms. W forward, S back, A/D strafe, Shift runs. Middle mouse camp. [E] Aircraft  [F] Water  [L] Lamp'
       : 'Click to look. Mouse looks. W adds power, S reduces it, A/D turn. [E] Exit';
+    if (this.uiBuild) {
+      const lines = this.buildOpen ? this.campLines() : [];
+      if (this.buildIndex >= lines.length) this.buildIndex = 0;
+      this.uiBuild.innerText = lines.map((line, i) => (i === this.buildIndex ? `> ${line}` : `  ${line}`)).join('\n');
+    }
     const kit = this.field;
     this.uiMeters.innerHTML = this.mode === 'ON_FOOT'
-      ? `<b>Hunger</b> ${Math.round(kit.hunger)}<br><b>Thirst</b> ${Math.round(kit.thirst)}<br><b>Stamina</b> ${Math.round(kit.stamina)}<br><b>Water cans</b> ${kit.cans}`
+      ? `<b>Hunger</b> ${Math.round(kit.hunger)}<br><b>Thirst</b> ${Math.round(kit.thirst)}<br><b>Stamina</b> ${Math.round(kit.stamina)}<br><b>Water cans</b> ${kit.cans}<br><b>Lamp</b> ${Math.round(this.lamp ? this.lamp.charge : 0)}`
       : '';
   }
 
@@ -439,22 +636,40 @@ class Game {
     requestAnimationFrame(() => this.animate());
 
     const delta = Math.min(this.clock.getDelta(), 0.1);
+    this.updateDay(delta);
 
     const onFoot = this.mode === 'ON_FOOT';
     const moving = onFoot && (this.keys['KeyW'] || this.keys['KeyA'] || this.keys['KeyS'] || this.keys['KeyD'] || this.keys['ArrowUp'] || this.keys['ArrowDown'] || this.keys['ArrowLeft'] || this.keys['ArrowRight']);
     if (this.field) {
       this.field.update(delta, onFoot, moving);
       this.player.pace = this.field.pace();
-      if (!this.aircraft.airborne && this.field.panelOut) {
-        this.aircraft.charge = Math.min(100, this.aircraft.charge + delta * this.field.chargeRate());
+      const spot = this.solar && this.solar.connected ? this.solar.spot() : null;
+      if (!this.aircraft.airborne && spot) {
+        this.aircraft.charge = Math.min(100, this.aircraft.charge + delta * this.field.chargeRate(spot.x, spot.z) * this.daylight);
       } else if (this.aircraft.airborne || this.aircraft.speed > 6) {
         this.aircraft.charge = Math.max(0, this.aircraft.charge - delta * 0.07);
       }
+      if (this.turbine && this.turbine.chargesPlane()) {
+        const windSpot = this.turbine.spot();
+        if (windSpot) {
+          this.aircraft.charge = Math.min(100, this.aircraft.charge + delta * this.field.windRate(windSpot.x, windSpot.z));
+        }
+      }
     }
+    const placingTent = this.tent && this.tent.placing;
+    const placingFire = this.fire && this.fire.placing;
+    const placingSolar = this.solar && this.solar.placing;
+    const placingTurbine = this.turbine && this.turbine.placing;
+    if (this.player) this.player.placing = !!((placingTent || placingFire || placingSolar || placingTurbine) && onFoot);
     this.player.update(delta, this.keys);
+    if (this.smurf) this.smurf.update(delta, this.player, onFoot);
     if (this.groundFx && this.player) {
       const running = this.keys['ShiftLeft'] || this.keys['ShiftRight'];
       this.groundFx.updateFeet(this.player, onFoot && moving, running);
+      if (this.smurf) {
+        const smurfMoving = this.smurf.pose !== 'idle';
+        this.groundFx.updateFeet(this.smurf, smurfMoving, this.smurf.pose === 'run', 'smurf', 0.58);
+      }
     }
     if (this.groundFx && this.aircraft) {
       const groundY = this.terrain.getHeightAt(this.aircraft.position.x, this.aircraft.position.z);
@@ -486,9 +701,27 @@ class Game {
     }
 
     if (this.mode === 'IN_AIRCRAFT' && this.aircraft) {
-      const rejected = this.aircraft.updatePoweredFlight(delta, this.keys, this.field && this.field.panelOut);
+      const gearOut = (this.solar && this.solar.blocksPower) || (this.turbine && this.turbine.blocksPower);
+      const rejected = this.aircraft.updatePoweredFlight(delta, this.keys, gearOut);
+      if (rejected && this.landingHint <= 0) this.audio.scrape();
       if (rejected) this.landingHint = 3;
       this.aircraftState = !this.aircraft.airborne && this.aircraft.speed < 0.8 ? 'PARKED' : 'FLYING';
+    }
+    if (this.aircraft) {
+      if (this.wasAirborne === false && this.aircraft.airborne) this.audio.liftoff();
+      if (this.wasAirborne === true && !this.aircraft.airborne) this.audio.touchdown();
+      this.wasAirborne = this.aircraft.airborne;
+      const surface = this.player
+        ? this.terrain.getSurfaceAt(this.player.position.x, this.player.position.z)
+        : null;
+      let wind = 0;
+      if (onFoot && surface) {
+        const open = 1 - Math.min(1, Math.max(0, surface.canopyDist) / 18);
+        const coast = 1 - Math.min(1, Math.max(0, surface.shoreDist) / 50);
+        wind = 0.25 + open * 0.35 + coast * 0.4;
+      }
+      this.audio.wind(wind);
+      this.audio.prop(this.aircraft.power, this.aircraft.speed, this.aircraft.airborne);
     }
 
     if (this.landingHint > 0) this.landingHint -= delta;
@@ -500,10 +733,87 @@ class Game {
 
     this.handleStateTransitions();
     this.updateCamera(delta);
+    const placing = placingTent ? this.tent : (placingFire ? this.fire : (placingSolar ? this.solar : (placingTurbine ? this.turbine : null)));
+    if (placing && onFoot) {
+      placing.aim(this.player);
+      const spot = placingTent ? this.tent : (placingFire ? this.fire.placeable : (placingSolar ? this.solar.placeable : this.turbine.placeable));
+      const name = spot.aimLabel;
+      this.uiPrompt.innerText = spot.valid
+        ? `Aim ${name}. Mouse forward and back sets distance. Scroll rotates. Click to place.`
+        : `Aim ${name}. Mouse forward and back sets distance. Scroll rotates. Click to place. ${spot.reason}`;
+    }
+    if (this.fire) this.fire.update(delta);
+    if (this.solar && this.player) this.solar.update(this.player);
+    if (this.turbine && this.player) {
+      const windSpot = this.turbine.spot();
+      const rate = windSpot && this.field ? this.field.windRate(windSpot.x, windSpot.z) : 0;
+      this.turbine.update(delta, this.player, rate);
+    }
+    if (this.lamp && this.player) this.lamp.update(delta, onFoot);
+    if (this.tentPower && this.player) this.tentPower.update(delta, this.player, this.daylight);
 
     this.keyJustPressed = {};
 
     this.composer.render();
+  }
+
+  updateDay(delta) {
+    this.dayTime = (this.dayTime + delta) % this.dayLength;
+    const pitch = (this.dayTime / this.dayLength) * Math.PI * 2;
+    this.sunPitch = pitch;
+    const horiz = Math.cos(pitch);
+    this.sunOffset.set(210 * horiz, Math.sin(pitch) * 160, 60 * horiz);
+
+    const sunDir = this._sunDir;
+    sunDir.copy(this.sunOffset).normalize();
+    const elev = sunDir.y;
+    const daylight = THREE.MathUtils.smoothstep(elev, -0.02, 0.18);
+    this.daylight = daylight;
+    if (this.field) this.field.daylight = daylight;
+
+    const dayBlend = THREE.MathUtils.smoothstep(elev, 0.05, 0.35);
+    const nightBlend = 1 - THREE.MathUtils.smoothstep(elev, -0.2, -0.02);
+    this._zenith.copy(this._duskZenith).lerp(this._dayZenith, dayBlend).lerp(this._nightZenith, nightBlend);
+    this._horizon.copy(this._duskHorizon).lerp(this._dayHorizon, dayBlend).lerp(this._nightHorizon, nightBlend);
+    this._warm.copy(this._duskWarm).lerp(this._dayWarm, dayBlend).lerp(this._nightWarm, nightBlend);
+
+    const sky = this.skyMat.uniforms;
+    sky.uZenith.value.copy(this._zenith);
+    sky.uHorizon.value.copy(this._horizon);
+    sky.uWarm.value.copy(this._warm);
+    sky.uDay.value = daylight;
+
+    this.scene.background.copy(this._horizon);
+    this.scene.fog.color.copy(this._horizon);
+
+    this.hemi.intensity = THREE.MathUtils.lerp(0.07, 0.55, daylight);
+    this.hemi.color.copy(this._nightHemi).lerp(this._dayHemi, daylight);
+    this.ambient.intensity = THREE.MathUtils.lerp(0.035, 0.18, daylight);
+    this.ambient.color.copy(this._nightAmbient).lerp(this._dayAmbient, daylight);
+
+    const sunUp = elev > 0.02;
+    this.dirLight.castShadow = sunUp;
+    if (sunUp) {
+      this.dirLight.color.copy(this._duskSun).lerp(this._daySun, daylight);
+      this.dirLight.intensity = THREE.MathUtils.lerp(0.45, 2.6, daylight);
+      this.lightOffset.copy(this.sunOffset);
+    } else {
+      this.dirLight.color.copy(this._moon);
+      this.dirLight.intensity = 0.22;
+      this.lightOffset.set(-this.sunOffset.x, Math.max(40, -this.sunOffset.y), -this.sunOffset.z);
+    }
+
+    this.renderer.toneMappingExposure = THREE.MathUtils.lerp(0.55, 1.05, daylight);
+    if (this.terrain) this.terrain.setDaylight(sunDir, daylight);
+  }
+
+  timeLabel() {
+    const elev = this._sunDir.y;
+    const pitch = this.sunPitch;
+    if (elev < -0.04) return 'Night';
+    if (elev < 0.22) return Math.cos(pitch) > 0 ? 'Morning' : 'Dusk';
+    if (pitch < 1.2) return 'Morning';
+    return 'Day';
   }
 
   updateShadowFocus() {
@@ -512,9 +822,200 @@ class Game {
     const sx = Math.round(focus.x / texel) * texel;
     const sy = Math.round(focus.y / texel) * texel;
     const sz = Math.round(focus.z / texel) * texel;
-    this.dirLight.position.set(sx + this.sunOffset.x, sy + this.sunOffset.y, sz + this.sunOffset.z);
+    this.dirLight.position.set(sx + this.lightOffset.x, sy + this.lightOffset.y, sz + this.lightOffset.z);
     this.dirLight.target.position.set(sx, sy, sz);
     this.dirLight.target.updateMatrixWorld();
+  }
+
+  campLines() {
+    const lines = [];
+    if (this.tent) {
+      if (this.tent.state === 'packed') lines.push(this.tent.placeLabel);
+      else if (this.tent.nearPlaced(this.player)) {
+        lines.push(this.tent.packLabel);
+        if (this.tentPower && !this.tentPower.cabling && !(this.solar && this.solar.cabling) && !(this.turbine && this.turbine.cabling)) {
+          lines.push(this.tentPower.connected ? 'Unplug tent cable' : 'Run tent cable');
+        }
+      }
+    }
+    if (this.fire) {
+      if (this.fire.packed) lines.push('Campfire');
+      else if (this.fire.near(this.player)) {
+        lines.push(this.fire.lit ? 'Put out fire' : 'Light fire');
+        lines.push('Pack campfire');
+      }
+    }
+    if (this.solar) {
+      if (this.solar.packed) lines.push('Solar panel');
+      else if (this.solar.near(this.player) && !this.solar.cabling) {
+        lines.push(this.solar.connected ? 'Unplug cable' : 'Run cable');
+        lines.push('Pack solar panel');
+      }
+    }
+    if (this.turbine) {
+      if (this.turbine.packed) lines.push('Wind turbine');
+      else if (this.turbine.near(this.player) && !this.turbine.cabling) {
+        const busy = (this.solar && this.solar.cabling) || (this.tentPower && this.tentPower.cabling) || (this.lamp && this.lamp.charging);
+        if (!busy) {
+          if (this.turbine.connected) lines.push('Unplug turbine');
+          else {
+            if (this.turbine.planeInReach()) lines.push('Run cable to plane');
+            if (this.turbine.tentInReach()) lines.push('Run cable to tent');
+          }
+        }
+        lines.push('Pack wind turbine');
+      }
+    }
+    if (this.lamp && this.lamp.canCharge() && !(this.solar && this.solar.cabling) && !(this.tentPower && this.tentPower.cabling) && !(this.turbine && this.turbine.cabling)) {
+      lines.push('Charge lamp');
+    }
+    return lines;
+  }
+
+  onMiddleClick() {
+    if (this.mode !== 'ON_FOOT') return;
+    if (document.pointerLockElement !== this.canvas) this.canvas.requestPointerLock();
+    if (this.tent && this.tent.placing) {
+      this.tent.cancel();
+      this.buildOpen = false;
+      return;
+    }
+    if (this.fire && this.fire.placing) {
+      this.fire.cancel();
+      this.buildOpen = false;
+      return;
+    }
+    if (this.solar && this.solar.placing) {
+      this.solar.cancel();
+      this.buildOpen = false;
+      return;
+    }
+    if (this.turbine && this.turbine.placing) {
+      this.turbine.cancel();
+      this.buildOpen = false;
+      return;
+    }
+    if (this.solar && this.solar.cabling) {
+      this.solar.cancelCable();
+      this.buildOpen = false;
+      return;
+    }
+    if (this.turbine && this.turbine.cabling) {
+      this.turbine.cancelCable();
+      this.buildOpen = false;
+      return;
+    }
+    if (this.tentPower && this.tentPower.cabling) {
+      this.tentPower.cancelCable();
+      this.buildOpen = false;
+      return;
+    }
+    if (this.lamp && this.lamp.charging) {
+      this.lamp.stopCharge();
+      this.buildOpen = false;
+      return;
+    }
+    if (this.buildOpen) {
+      this.buildOpen = false;
+      return;
+    }
+    if (this.campLines().length) {
+      this.buildIndex = 0;
+      this.buildOpen = true;
+    }
+  }
+
+  onLeftClick() {
+    if (this.mode !== 'ON_FOOT') return;
+    if (this.tent && this.tent.placing) {
+      if (this.tent.confirm()) this.audio.click();
+      return;
+    }
+    if (this.fire && this.fire.placing) {
+      if (this.fire.confirm()) this.audio.click();
+      return;
+    }
+    if (this.solar && this.solar.placing) {
+      if (this.solar.confirm()) this.audio.click();
+      return;
+    }
+    if (this.turbine && this.turbine.placing) {
+      if (this.turbine.confirm()) this.audio.click();
+      return;
+    }
+    if (this.solar && this.solar.cabling) {
+      if (this.solar.tryPlug(this.player)) this.audio.click();
+      return;
+    }
+    if (this.turbine && this.turbine.cabling) {
+      if (this.turbine.tryPlug(this.player)) this.audio.click();
+      return;
+    }
+    if (this.tentPower && this.tentPower.cabling) {
+      if (this.tentPower.tryPlug(this.player)) this.audio.click();
+      return;
+    }
+    if (!this.buildOpen) return;
+    const lines = this.campLines();
+    const line = lines[this.buildIndex];
+    if (line === 'Tent' && this.tent) {
+      this.tent.startPlacing(this.player);
+    } else if (line === 'Pack tent' && this.tent) {
+      this.tent.pack();
+      if (this.tentPower) this.tentPower.drop();
+      if (this.turbine) this.turbine.dropIfTent();
+    } else if (line === 'Run tent cable' && this.tentPower) {
+      if (this.solar && this.solar.cabling) return;
+      if (this.turbine && this.turbine.cabling) return;
+      if (this.lamp && this.lamp.charging) return;
+      if (!this.tentPower.startCable()) return;
+    } else if (line === 'Unplug tent cable' && this.tentPower) {
+      this.tentPower.unplug();
+    } else if (line === 'Campfire' && this.fire) {
+      this.fire.startPlacing(this.player);
+    } else if (line === 'Light fire' && this.fire) {
+      this.fire.setLit(true);
+    } else if (line === 'Put out fire' && this.fire) {
+      this.fire.setLit(false);
+    } else if (line === 'Pack campfire' && this.fire) {
+      this.fire.pack();
+    } else if (line === 'Solar panel' && this.solar) {
+      this.solar.startPlacing(this.player);
+    } else if (line === 'Run cable' && this.solar) {
+      if (this.tentPower && this.tentPower.cabling) return;
+      if (this.turbine && this.turbine.cabling) return;
+      if (this.lamp && this.lamp.charging) return;
+      this.solar.startCable();
+    } else if (line === 'Unplug cable' && this.solar) {
+      this.solar.unplug();
+    } else if (line === 'Pack solar panel' && this.solar) {
+      this.solar.pack();
+    } else if (line === 'Wind turbine' && this.turbine) {
+      this.turbine.startPlacing(this.player);
+    } else if (line === 'Run cable to plane' && this.turbine) {
+      if (this.solar && this.solar.cabling) return;
+      if (this.tentPower && this.tentPower.cabling) return;
+      if (this.lamp && this.lamp.charging) return;
+      if (!this.turbine.startCable('plane')) return;
+    } else if (line === 'Run cable to tent' && this.turbine) {
+      if (this.solar && this.solar.cabling) return;
+      if (this.tentPower && this.tentPower.cabling) return;
+      if (this.lamp && this.lamp.charging) return;
+      if (!this.turbine.startCable('tent')) return;
+    } else if (line === 'Unplug turbine' && this.turbine) {
+      this.turbine.unplug();
+    } else if (line === 'Pack wind turbine' && this.turbine) {
+      this.turbine.pack();
+    } else if (line === 'Charge lamp' && this.lamp) {
+      if (this.solar && this.solar.cabling) return;
+      if (this.tentPower && this.tentPower.cabling) return;
+      if (this.turbine && this.turbine.cabling) return;
+      if (!this.lamp.startCharge()) return;
+    } else {
+      return;
+    }
+    this.buildOpen = false;
+    this.audio.click();
   }
 
   onWindowResize() {

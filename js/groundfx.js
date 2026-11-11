@@ -125,13 +125,13 @@ export class GroundFx {
     }
   }
 
-  stampFoot(player, side) {
+  stampFoot(player, side, scale = 1) {
     const yaw = player.mesh.rotation.y;
     const sin = Math.sin(yaw);
     const cos = Math.cos(yaw);
-    const lateral = 0.11 * side;
-    const x = player.position.x + cos * lateral - sin * 0.06;
-    const z = player.position.z - sin * lateral - cos * 0.06;
+    const lateral = 0.11 * scale * side;
+    const x = player.position.x + cos * lateral - sin * 0.06 * scale;
+    const z = player.position.z - sin * lateral - cos * 0.06 * scale;
     const surface = this.terrain.getSurfaceAt(x, z);
     const water = this.terrain.waterAt(x, z);
     if (water.depth > 0.05 || surface.kind === 'ocean' || surface.kind === 'river' || surface.kind === 'lake') return;
@@ -149,11 +149,12 @@ export class GroundFx {
     const print = new THREE.Mesh(this.soleGeo, material);
     print.position.set(x, surface.height + 0.06, z);
     print.rotation.y = yaw;
+    print.scale.setScalar(scale);
     print.renderOrder = 2;
     print.userData.life = PRINT_LIFE;
     this.scene.add(print);
     this.prints.push(print);
-    if (this.prints.length > 180) {
+    if (this.prints.length > 280) {
       const old = this.prints.shift();
       this.scene.remove(old);
       old.material.dispose();
@@ -182,33 +183,46 @@ export class GroundFx {
     }
   }
 
-  updateFeet(player, moving, running) {
-    if (!player || !moving || !player.active) {
-      this.stepCarry = 0;
-      this.lastStep = null;
+  footTrack(who) {
+    if (!this.tracks) this.tracks = {};
+    if (!this.tracks[who]) this.tracks[who] = { carry: 0, last: null, side: 1 };
+    return this.tracks[who];
+  }
+
+  updateFeet(walker, moving, running, who = 'player', scale = 1) {
+    const track = this.footTrack(who);
+    if (!walker || !moving || walker.active === false) {
+      track.carry = 0;
+      track.last = null;
       return;
     }
-    const p = player.position;
+    const p = walker.position;
     const water = this.terrain.waterAt(p.x, p.z);
     const wet = water.depth > 0.05;
-    if (!this.lastStep) {
-      this.lastStep = { x: p.x, z: p.z };
+    if (!track.last) {
+      track.last = { x: p.x, z: p.z };
       return;
     }
-    const len = Math.hypot(p.x - this.lastStep.x, p.z - this.lastStep.z);
-    this.lastStep.x = p.x;
-    this.lastStep.z = p.z;
+    const len = Math.hypot(p.x - track.last.x, p.z - track.last.z);
+    track.last.x = p.x;
+    track.last.z = p.z;
     if (len > 2) {
-      this.stepCarry = 0;
+      track.carry = 0;
       return;
     }
-    this.stepCarry += len;
-    const stride = wet ? 0.62 : (running ? 1.15 : 0.78);
-    if (this.stepCarry < stride) return;
-    this.stepCarry -= stride;
-    if (wet) this.spawnRipple(p.x, p.z, water.surface);
-    else this.stampFoot(player, this.footSide);
-    this.footSide *= -1;
+    track.carry += len;
+    const stride = (wet ? 0.62 : (running ? 1.15 : 0.78)) * scale;
+    if (track.carry < stride) return;
+    track.carry -= stride;
+    if (wet) {
+      this.spawnRipple(p.x, p.z, water.surface);
+      if (this.audio) this.audio.splash(scale);
+    } else {
+      const surface = this.terrain.getSurfaceAt(p.x, p.z);
+      this.stampFoot(walker, track.side, scale);
+      if (this.audio) this.audio.step(surface.kind, scale < 0.8 ? 1.45 : 1);
+    }
+    track.side *= -1;
   }
 
   spawnPuff(x, z, y, tint, rising) {

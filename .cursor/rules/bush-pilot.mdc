@@ -1,0 +1,16 @@
+---
+description: Bush Pilot file map and how the game loop is wired
+globs: js/**,index.html
+alwaysApply: false
+---
+
+# Bush Pilot
+
+Static Three.js game. Entry is `index.html` → `js/main.js` (`Game`).
+
+- Modes: `ON_FOOT` and `IN_AIRCRAFT`. Flight state is `PARKED` or `FLYING` from speed and `airborne`.
+- World: `js/terrain.js` (one cay, beach park spawn, solids, water, grass). `js/airport.js`, `js/takeoffManager.js`, `js/landingManager.js`, `js/taxiManager.js`, and `js/landingAid.js` are unused by `main.js`.
+- Actors: `js/player.js`, `js/aircraft.js` (power flight), `js/smurf.js` (follows on foot, runs home when boarded), `js/fieldkit.js` (hunger, thirst, stamina, water cans, solar panel, cargo).
+- Look: `js/groundfx.js` (prints, ripples, grass contact). Sound: `js/audio.js` (synthesized; `audio/prop.mp3` is not wired yet). Loads: `js/loaders.js`.
+
+Full map and habits: `docs/ARCHITECTURE.md`, `docs/VERIFY.md`, `docs/ROADMAP.md`.

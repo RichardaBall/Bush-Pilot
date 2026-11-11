@@ -1,0 +1,24 @@
+---
+description: Keep agent work small so credits last. No browser or subagents unless asked.
+alwaysApply: true
+---
+
+# Agent scope
+
+When the user asks for something in plain language, do this yourself. They should not need to paste `docs/PROMPTS.md` or name every file.
+
+## Before tools
+
+1. Map the ask to the smallest file set using `.cursor/rules/bush-pilot.mdc` and `docs/ARCHITECTURE.md` only. Do not glob the repo or read `terrain.js` unless the task is world or scatter.
+2. If the ask fits one row in `docs/ROADMAP.md`, follow that scope. If it names a system (sound, Smurf, camp, plane), open only the files in the architecture table for that system, plus at most one caller (usually `main.js`).
+3. If two interpretations would change the plan a lot, ask one short question. Otherwise pick the smaller change and say what you assumed.
+4. In the first reply, one line: **Scope:** files you will touch. Then implement. No long recap of the project.
+
+## While working
+
+- Edit only scoped files. Grep a single symbol if the path is unknown; never read all of `js/`.
+- Do not use the browser, screenshots, or CDP unless the user says "verify in browser" or "screenshot".
+- Do not spawn subagents unless the change touches four or more unrelated areas.
+- Syntax-check with `node --check js/<file>.js`. Do not start a local server.
+- Stop when the scoped task is done. Point the user to the matching bullets in `docs/VERIFY.md` for playtest. Do not browser-test for them.
+- One feature per chat. If they ask for several, do the first and list what is left.

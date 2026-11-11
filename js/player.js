@@ -37,6 +37,7 @@ export class Player {
     }
 
     this.active = true;
+    this.placing = false;
   }
 
   setPose(name) {
@@ -78,6 +79,22 @@ export class Player {
 
   update(delta, keys) {
     if (!this.active) return;
+
+    if (this.placing) {
+      this.moveDir.set(0, 0, 0);
+      this.walkCycleTime = 0;
+      this.placeFeet();
+      this.setPose('idle');
+      const held = this.mesh.userData;
+      if (held && held.leftArmGroup) {
+        held.leftArmGroup.rotation.x = THREE.MathUtils.lerp(held.leftArmGroup.rotation.x, 0, delta * 10);
+        held.rightArmGroup.rotation.x = THREE.MathUtils.lerp(held.rightArmGroup.rotation.x, 0, delta * 10);
+        held.leftLegGroup.rotation.x = THREE.MathUtils.lerp(held.leftLegGroup.rotation.x, 0, delta * 10);
+        held.rightLegGroup.rotation.x = THREE.MathUtils.lerp(held.rightLegGroup.rotation.x, 0, delta * 10);
+      }
+      if (this.mixer) this.mixer.update(delta);
+      return;
+    }
 
     let inputX = 0;
     let inputZ = 0;

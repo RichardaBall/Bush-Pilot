@@ -40,7 +40,8 @@ export class Aircraft {
     this.terrain = terrain;
     this.mesh = piperMesh;
 
-    // mph converted to m/s for the 150 hp Super Cub
+    // Game pace. Airborne full power is half of 51 m/s. The ground roll
+    // still aims at 51 so liftoff at 20.5 m/s works above 62% power.
     this.specs = {
       taxi: 5.5,
       tailUp: 12,
@@ -48,8 +49,9 @@ export class Aircraft {
       liftoff: 20.5,
       climb: 31,
       climbRate: 4.8,
-      cruise: 46,
-      maxSpeed: 51,
+      cruise: 23,
+      maxSpeed: 25.5,
+      groundSpeed: 51,
       approach: 25,
       slow: 18,
       brake: 3.2
@@ -118,8 +120,8 @@ export class Aircraft {
     const thrust = this.powerFactor() / this.loadFactor();
     const targetSpeed = this.airborne
       ? THREE.MathUtils.lerp(specs.slow, specs.maxSpeed, this.power) * thrust
-      : this.power * specs.maxSpeed * roll.accel * thrust;
-    const accel = (this.airborne ? 4.4 : 3.1 * roll.accel) * thrust;
+      : this.power * specs.groundSpeed * roll.accel * thrust;
+    const accel = (this.airborne ? 4.4 : 6.2 * roll.accel) * thrust;
     const brake = this.airborne ? 3.6 : 5.2 * roll.brake * (down && roll.soft ? 0.65 : 1);
     if (this.speed < targetSpeed) this.speed = Math.min(targetSpeed, this.speed + accel * delta);
     else this.speed = Math.max(targetSpeed, this.speed - brake * delta);

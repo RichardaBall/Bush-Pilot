@@ -1276,6 +1276,21 @@ export class Terrain {
     return this._waterNormals;
   }
 
+  setDaylight(sunDir, daylight) {
+    if (this.oceanUniforms && this.oceanUniforms.uDay) this.oceanUniforms.uDay.value = daylight;
+    const lake = this.lakeMesh;
+    if (!lake || !lake.material.uniforms) return;
+    const uniforms = lake.material.uniforms;
+    if (uniforms.sunDirection) uniforms.sunDirection.value.copy(sunDir);
+    if (uniforms.sunColor) {
+      if (!this._lakeDaySun) {
+        this._lakeDaySun = new THREE.Color(0x9eb4c4);
+        this._lakeNightSun = new THREE.Color(0x1a2744);
+      }
+      uniforms.sunColor.value.copy(this._lakeNightSun).lerp(this._lakeDaySun, daylight);
+    }
+  }
+
   makeWater(geometry, size, distortion) {
     const sun = new THREE.Vector3(210, 120, 60).normalize();
     const water = new Water(geometry, {
@@ -1331,6 +1346,7 @@ export class Terrain {
     mat.customProgramCacheKey = () => 'bush-lagoon';
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uTime = { value: 0 };
+      shader.uniforms.uDay = { value: 1 };
       shader.uniforms.uCoast = { value: this.coastLUT };
       shader.uniforms.uCoastN = { value: this.coastLUT.image.width };
       shader.uniforms.uSpit = { value: this.spitVecs };
@@ -1339,7 +1355,7 @@ export class Terrain {
         .replace('#include <common>', '#include <common>\nvarying vec3 vOceanWorld;')
         .replace('#include <project_vertex>', 'vOceanWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\n#include <project_vertex>');
       shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', `#include <common>\nvarying vec3 vOceanWorld;\nuniform float uTime;\n${COAST_GLSL}`)
+        .replace('#include <common>', `#include <common>\nvarying vec3 vOceanWorld;\nuniform float uTime;\nuniform float uDay;\n${COAST_GLSL}`)
         .replace('#include <color_fragment>', `
           vec2 xz = vOceanWorld.xz;
           float shore = shoreDistAt(xz);
@@ -1352,7 +1368,10 @@ export class Terrain {
           col += vec3(0.08, 0.16, 0.14) * smoothstep(0.72, 1.0, rip) * (1.0 - depth);
           float foam = smoothstep(-7.0, -2.2, shore) * smoothstep(0.3, -1.2, shore);
           foam *= 0.55 + 0.45 * sin(shore * 1.3 - uTime * 1.6);
-          col = mix(col, vec3(0.82, 0.94, 0.92), clamp(foam, 0.0, 0.55));
+          float shade = mix(0.08, 1.0, uDay);
+          col *= shade;
+          vec3 foamCol = vec3(0.82, 0.94, 0.92) * mix(0.28, 1.0, uDay);
+          col = mix(col, foamCol, clamp(foam, 0.0, 0.55));
           diffuseColor.rgb = col;`);
     };
     this.ocean = new THREE.Mesh(geo, mat);
