@@ -66,6 +66,7 @@ Serve the folder (any static server), open `index.html`, click the canvas once s
 
 - [ ] In the channel and off the south shore, rings spread on the water every few seconds. The home beach, forest, and home lake stay clear of them.
 - [ ] Now and then a fish jumps: a tapered body, forked tail, and fin, then a ring where it lands. A quiet splash plays if you are close.
+- [ ] Off the south shore, a turtle swims at the surface with its flippers moving.
 
 **Sound** (`audio.js`, `groundfx.js`)
 

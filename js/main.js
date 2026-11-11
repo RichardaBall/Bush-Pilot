@@ -20,10 +20,11 @@ import { Lamp } from './lamp.js';
 import { TentPower } from './tentpower.js';
 import { WaterBarrel } from './barrel.js';
 import { Weather } from './weather.js';
-import { FishingRod } from './rod.js';
+import { FishingRod, cloneFish, disposeFish } from './rod.js';
 import { CarBattery } from './battery.js';
 import { Birds } from './birds.js';
 import { Fish } from './fish.js';
+import { Turtles } from './turtle.js';
 
 const FISH_ROT = 90;
 const FISH_PICK = 1.5;
@@ -382,13 +383,18 @@ class Game {
     this.terrain.scatterClouds(cloudScene);
     this.birds = new Birds(this.scene, this.terrain, this.audio);
     this.fishLife = new Fish(this.scene, this.terrain, this.audio);
-    const [humanMesh, smurfMesh, campMesh] = await Promise.all([
+    const [humanMesh, smurfMesh, campMesh, fishTemplates, turtleAsset] = await Promise.all([
       loader.loadHuman().catch(() => loader.createHumanAvatar()),
       loader.loadSmurf().catch((err) => {
         console.warn('Smurf failed to load', err);
         return null;
       }),
-      loader.loadCamp()
+      loader.loadCamp(),
+      loader.loadFishPack(),
+      loader.loadTurtle().catch((err) => {
+        console.warn('Turtle failed to load', err);
+        return null;
+      })
     ]);
 
     this.player = new Player(this.scene, this.terrain, humanMesh);
@@ -410,16 +416,16 @@ class Game {
     this.turbine = new WindTurbine(this.scene, this.terrain, this.aircraft, this.tent, this.tentPower);
     this.field = new FieldKit(this.terrain);
     this.barrel = new WaterBarrel(this.scene, this.terrain);
-    this.rod = new FishingRod(this.scene, this.terrain);
+    this.fishTemplates = fishTemplates;
+    this.turtles = turtleAsset
+      ? new Turtles(this.scene, this.terrain, turtleAsset.model, turtleAsset.swim, turtleAsset.shellHeight)
+      : null;
+    this.rod = new FishingRod(this.scene, this.terrain, fishTemplates);
     this.heldFish = false;
-    this.fishCarry = new THREE.Mesh(
-      new THREE.SphereGeometry(0.07, 8, 6),
-      new THREE.MeshStandardMaterial({ color: 0xc47a45, roughness: 0.55 })
-    );
-    this.fishCarry.scale.set(1.6, 0.5, 0.7);
+    this.heldKind = -1;
+    this.fishCarry = new THREE.Group();
     this.fishCarry.position.set(0.11, 0.04, 0.02);
     this.fishCarry.rotation.z = 0.6;
-    this.fishCarry.castShadow = true;
     this.fishCarry.frustumCulled = false;
     this.fishCarry.visible = false;
     this.lamp.mesh.add(this.fishCarry);
@@ -793,6 +799,7 @@ class Game {
       const rain = this.weather ? this.weather.amount : 0;
       this.birds.update(delta, focus, onFoot, this.daylight, rain, this.fire, this.aircraft);
       if (this.fishLife) this.fishLife.update(delta, focus);
+      if (this.turtles) this.turtles.update(delta, focus);
     }
     if (this.solar && this.player) this.solar.update(this.player);
     if (this.turbine && this.player) {
@@ -1000,9 +1007,11 @@ class Game {
       return;
     }
     this.wireNote = '';
-    if (here.kind === 'rod' && this.rod.caught && !this.heldFish && this.rod.takeFish()) {
+    if (here.kind === 'rod' && this.rod.caught && !this.heldFish) {
+      const kind = this.rod.takeFish();
+      if (kind === false) return;
       this.heldFish = true;
-      this.fishCarry.visible = true;
+      this.showHeldFish(kind);
       this.audio.click();
       return;
     }
@@ -1071,28 +1080,70 @@ class Game {
   cookFish() {
     if (!this.heldFish) return;
     this.heldFish = false;
-    this.fishCarry.visible = false;
+    this.clearHeldFish();
     this.field.eatFish();
     this.audio.click();
   }
 
+  showHeldFish(kind) {
+    this.clearHeldFish();
+    this.heldKind = kind;
+    const templates = this.fishTemplates;
+    if (kind >= 0 && templates && templates[kind]) {
+      this.fishCarry.add(cloneFish(templates[kind]));
+    } else {
+      const mesh = new THREE.Mesh(
+        this.fishShape,
+        new THREE.MeshStandardMaterial({ color: 0xc47a45, roughness: 0.55 })
+      );
+      mesh.scale.set(1.6, 0.5, 0.7);
+      mesh.castShadow = true;
+      mesh.frustumCulled = false;
+      this.fishCarry.add(mesh);
+    }
+    this.fishCarry.visible = true;
+  }
+
+  clearHeldFish() {
+    while (this.fishCarry.children.length) {
+      const child = this.fishCarry.children[0];
+      this.fishCarry.remove(child);
+      if (child.geometry === this.fishShape) child.material.dispose();
+      else disposeFish(child);
+    }
+    this.fishCarry.visible = false;
+    this.heldKind = -1;
+  }
+
   dropFish() {
     if (!this.heldFish) return;
+    const kind = this.heldKind;
     this.heldFish = false;
-    this.fishCarry.visible = false;
+    this.clearHeldFish();
     const yaw = this.player.mesh.rotation.y;
     const x = this.player.position.x + Math.sin(yaw) * 0.7;
     const z = this.player.position.z + Math.cos(yaw) * 0.7;
-    const mesh = new THREE.Mesh(
-      this.fishShape,
-      new THREE.MeshStandardMaterial({ color: 0xc47a45, roughness: 0.7 })
-    );
-    mesh.scale.set(1.6, 0.5, 0.7);
-    mesh.position.set(x, this.terrain.getHeightAt(x, z) + 0.05, z);
-    mesh.rotation.y = yaw;
-    mesh.castShadow = true;
+    const templates = this.fishTemplates;
+    let mesh;
+    let lift = 0.05;
+    if (kind >= 0 && templates && templates[kind]) {
+      mesh = cloneFish(templates[kind]);
+      mesh.rotation.y = yaw;
+      mesh.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(mesh);
+      if (!box.isEmpty()) lift = -box.min.y;
+    } else {
+      mesh = new THREE.Mesh(
+        this.fishShape,
+        new THREE.MeshStandardMaterial({ color: 0xc47a45, roughness: 0.7 })
+      );
+      mesh.scale.set(1.6, 0.5, 0.7);
+      mesh.rotation.y = yaw;
+      mesh.castShadow = true;
+    }
+    mesh.position.set(x, this.terrain.getHeightAt(x, z) + lift, z);
     this.scene.add(mesh);
-    this.groundFish.push({ mesh, life: FISH_ROT });
+    this.groundFish.push({ mesh, life: FISH_ROT, kind });
   }
 
   nearestCatch() {
@@ -1115,10 +1166,24 @@ class Game {
     if (index < 0 || this.heldFish) return;
     this.groundFish.splice(index, 1);
     this.scene.remove(item.mesh);
-    item.mesh.material.dispose();
+    if (item.kind >= 0) disposeFish(item.mesh);
+    else item.mesh.material.dispose();
     this.heldFish = true;
-    this.fishCarry.visible = true;
+    this.showHeldFish(item.kind);
     this.audio.click();
+  }
+
+  darkenFish(root, fresh) {
+    const gain = 0.45 + fresh * 0.55;
+    root.traverse((child) => {
+      if (!child.isMesh) return;
+      const list = Array.isArray(child.material) ? child.material : [child.material];
+      for (const mat of list) {
+        if (!mat || !mat.color) continue;
+        if (!mat.userData.baseColor) mat.userData.baseColor = mat.color.clone();
+        mat.color.copy(mat.userData.baseColor).multiplyScalar(gain);
+      }
+    });
   }
 
   ageFish(delta) {
@@ -1127,10 +1192,12 @@ class Game {
       const item = this.groundFish[i];
       item.life -= delta;
       const fresh = Math.max(0, item.life / FISH_ROT);
-      item.mesh.material.color.setRGB(0.35 + fresh * 0.42, 0.22 + fresh * 0.26, 0.12 + fresh * 0.15);
+      if (item.kind >= 0) this.darkenFish(item.mesh, fresh);
+      else item.mesh.material.color.setRGB(0.35 + fresh * 0.42, 0.22 + fresh * 0.26, 0.12 + fresh * 0.15);
       if (item.life > 0) continue;
       this.scene.remove(item.mesh);
-      item.mesh.material.dispose();
+      if (item.kind >= 0) disposeFish(item.mesh);
+      else item.mesh.material.dispose();
       this.groundFish.splice(i, 1);
     }
   }

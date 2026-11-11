@@ -1,7 +1,31 @@
 import * as THREE from 'three';
 import { Tent } from './tent.js';
 
-function createRod() {
+export function cloneFish(template) {
+  const clone = template.clone(true);
+  clone.traverse((child) => {
+    if (!child.isMesh) return;
+    child.geometry = child.geometry.clone();
+    if (Array.isArray(child.material)) child.material = child.material.map((mat) => (mat ? mat.clone() : mat));
+    else if (child.material) child.material = child.material.clone();
+    child.castShadow = true;
+    child.frustumCulled = false;
+  });
+  return clone;
+}
+
+export function disposeFish(root) {
+  root.traverse((child) => {
+    if (!child.isMesh) return;
+    if (child.geometry) child.geometry.dispose();
+    const list = Array.isArray(child.material) ? child.material : [child.material];
+    for (const mat of list) {
+      if (mat) mat.dispose();
+    }
+  });
+}
+
+function createRod(templates) {
   const root = new THREE.Group();
   const wood = new THREE.MeshStandardMaterial({ color: 0x8a6a3e, roughness: 0.9 });
   const stick = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.02, 1.35, 6), wood);
@@ -29,25 +53,32 @@ function createRod() {
   bag.rotation.x = Math.PI;
   root.add(bag);
 
-  const fish = new THREE.Mesh(
-    new THREE.SphereGeometry(0.09, 8, 6),
-    new THREE.MeshStandardMaterial({ color: 0xc47a45, roughness: 0.55 })
-  );
+  const fish = new THREE.Group();
   fish.name = 'fish';
-  fish.scale.set(1.5, 0.55, 0.7);
   fish.position.set(0.42, 0.08, 0.05);
   fish.rotation.y = 0.4;
   fish.visible = false;
-  fish.castShadow = true;
+  if (!templates || !templates.length) {
+    const blob = new THREE.Mesh(
+      new THREE.SphereGeometry(0.09, 8, 6),
+      new THREE.MeshStandardMaterial({ color: 0xc47a45, roughness: 0.55 })
+    );
+    blob.name = 'fallback';
+    blob.scale.set(1.5, 0.55, 0.7);
+    blob.castShadow = true;
+    fish.add(blob);
+  }
   root.add(fish);
   return root;
 }
 
 export class FishingRod {
-  constructor(scene, terrain) {
+  constructor(scene, terrain, fishTemplates) {
     this.scene = scene;
     this.terrain = terrain;
-    this.placeable = new Tent(scene, terrain, createRod(), {
+    this.fishTemplates = fishTemplates && fishTemplates.length ? fishTemplates : null;
+    this.kind = -1;
+    this.placeable = new Tent(scene, terrain, createRod(this.fishTemplates), {
       place: 'Fishing rod',
       pack: 'Pack fishing rod',
       aim: 'the fishing rod'
@@ -136,6 +167,7 @@ export class FishingRod {
   confirm() {
     if (!this._spot || !this.placeable.confirm()) return false;
     this.caught = false;
+    this.kind = -1;
     this.wait = 16 + Math.random() * 34;
     const fish = this.placeable.placed.getObjectByName('fish');
     if (fish) fish.visible = false;
@@ -145,20 +177,50 @@ export class FishingRod {
   }
 
   pack() {
+    const fish = this.placeable.placed && this.placeable.placed.getObjectByName('fish');
+    if (fish) this.clearCatch(fish);
     this.caught = false;
+    this.kind = -1;
     this._spot = null;
     this.line.visible = false;
     this.bobber.visible = false;
     this.placeable.pack();
   }
 
+  clearCatch(fish) {
+    for (let i = fish.children.length - 1; i >= 0; i--) {
+      const child = fish.children[i];
+      if (child.name === 'fallback') continue;
+      fish.remove(child);
+      disposeFish(child);
+    }
+  }
+
+  landFish(root) {
+    const fish = root.getObjectByName('fish');
+    if (!fish) return;
+    this.clearCatch(fish);
+    if (this.fishTemplates) {
+      this.kind = Math.floor(Math.random() * this.fishTemplates.length);
+      fish.add(cloneFish(this.fishTemplates[this.kind]));
+    } else {
+      this.kind = -1;
+    }
+    fish.visible = true;
+  }
+
   takeFish() {
     if (!this.caught) return false;
+    const kind = this.fishTemplates ? this.kind : -1;
     this.caught = false;
     const fish = this.placeable.placed && this.placeable.placed.getObjectByName('fish');
-    if (fish) fish.visible = false;
+    if (fish) {
+      fish.visible = false;
+      this.clearCatch(fish);
+    }
+    this.kind = -1;
     this.wait = 16 + Math.random() * 34;
-    return true;
+    return kind;
   }
 
   update(delta) {
@@ -174,8 +236,7 @@ export class FishingRod {
       this.wait -= delta;
       if (this.wait <= 0) {
         this.caught = true;
-        const fish = mesh.getObjectByName('fish');
-        if (fish) fish.visible = true;
+        this.landFish(mesh);
       }
     }
     const tip = mesh.getObjectByName('tip');

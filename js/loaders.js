@@ -1,7 +1,59 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
-import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { FBXLoader } from './FBXLoader.js';
+
+const FISH_NAMES = ['fish01', 'fish02', 'fish03'];
+const FISH_LENGTH = 0.28;
+
+function toStandard(material) {
+  const source = Array.isArray(material) ? material : [material];
+  const next = source.map((mat) => {
+    if (!mat) return mat;
+    const standard = new THREE.MeshStandardMaterial({
+      map: mat.map || null,
+      color: mat.color ? mat.color.clone() : new THREE.Color(0xffffff),
+      roughness: 0.72,
+      metalness: 0,
+      normalMap: mat.normalMap || null,
+      transparent: !!mat.transparent,
+      opacity: mat.opacity === undefined ? 1 : mat.opacity,
+      alphaTest: mat.alphaTest || (mat.transparent ? 0.4 : 0),
+      side: mat.side
+    });
+    if (standard.map) standard.map.colorSpace = THREE.SRGBColorSpace;
+    return standard;
+  });
+  return Array.isArray(material) ? next : next[0];
+}
+
+function fitFish(root) {
+  root.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(root);
+  if (box.isEmpty()) return;
+  const size = new THREE.Vector3();
+  const center = new THREE.Vector3();
+  box.getSize(size);
+  box.getCenter(center);
+  const ranked = [
+    { len: size.x, axis: new THREE.Vector3(1, 0, 0) },
+    { len: size.y, axis: new THREE.Vector3(0, 1, 0) },
+    { len: size.z, axis: new THREE.Vector3(0, 0, 1) }
+  ].sort((a, b) => b.len - a.len);
+  const long = ranked[0].axis;
+  const thin = ranked[2].axis;
+  const mid = new THREE.Vector3().crossVectors(long, thin);
+  if (mid.dot(ranked[1].axis) < 0) mid.negate();
+  const align = new THREE.Matrix4().makeBasis(long, thin, mid).invert();
+  align.multiply(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z));
+  for (const mesh of root.children) mesh.geometry.applyMatrix4(align);
+  root.updateMatrixWorld(true);
+  const fitted = new THREE.Box3().setFromObject(root);
+  const fittedSize = new THREE.Vector3();
+  fitted.getSize(fittedSize);
+  const longest = Math.max(fittedSize.x, fittedSize.y, fittedSize.z, 0.001);
+  root.scale.setScalar(FISH_LENGTH / longest);
+}
 
 export class AssetLoader {
   constructor() {
@@ -66,6 +118,33 @@ export class AssetLoader {
         () => resolve(null)
       );
     });
+  }
+
+  loadFishPack() {
+    return this.loadFbx('./models/fishpack.fbx').then((model) => {
+      model.updateMatrixWorld(true);
+      const templates = [];
+      for (const name of FISH_NAMES) {
+        const source = model.getObjectByName(name);
+        if (!source) continue;
+        source.updateWorldMatrix(true, true);
+        const root = new THREE.Group();
+        root.name = name;
+        source.traverse((child) => {
+          if (!child.isMesh) return;
+          const geom = child.geometry.clone();
+          geom.applyMatrix4(child.matrixWorld);
+          const mesh = new THREE.Mesh(geom, toStandard(child.material));
+          mesh.castShadow = true;
+          mesh.frustumCulled = false;
+          root.add(mesh);
+        });
+        if (!root.children.length) continue;
+        fitFish(root);
+        templates.push(root);
+      }
+      return templates.length ? templates : null;
+    }).catch(() => null);
   }
 
   loadPiperModel() {
@@ -316,6 +395,47 @@ export class AssetLoader {
       pivot.add(model);
       pivot.userData.smurfRig = rig;
       return pivot;
+    });
+  }
+
+  // Sea turtle from models/turtle.fbx. Belly on the origin, nose along +Z, shell about 1.1 m.
+  loadTurtle() {
+    return this.loadFbx('./models/turtle.fbx').then((model) => {
+      model.traverse((child) => {
+        if (child.isLight || child.isCamera) {
+          child.visible = false;
+          return;
+        }
+        if (!child.isMesh) return;
+        child.castShadow = true;
+        child.receiveShadow = true;
+        child.frustumCulled = false;
+        child.material = toStandard(child.material);
+      });
+
+      model.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(model);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const longest = Math.max(size.x, size.y, size.z, 0.001);
+      model.scale.multiplyScalar(1.1 / longest);
+      model.updateMatrixWorld(true);
+      const fitted = new THREE.Box3().setFromObject(model);
+      const center = new THREE.Vector3();
+      fitted.getCenter(center);
+      model.position.x -= center.x;
+      model.position.z -= center.z;
+      model.position.y -= fitted.min.y;
+      model.updateMatrixWorld(true);
+      const sunk = new THREE.Box3().setFromObject(model);
+      const shell = new THREE.Vector3();
+      sunk.getSize(shell);
+
+      const swim = (model.animations || []).find((clip) => /(^|\|)Swim$/.test(clip.name)) || null;
+      return { model, swim, shellHeight: shell.y };
+    }).catch((err) => {
+      console.warn('Turtle failed to load', err);
+      return null;
     });
   }
 
