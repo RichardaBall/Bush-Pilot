@@ -374,24 +374,45 @@ float smoothMax(float a, float b, float k) {
   float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
   return mix(a, b, h) + k * h * (1.0 - h);
 }
+uniform sampler2D uFarCoast;
+uniform float uFarCoastN;
+uniform vec2 uFarCenter;
+uniform float uUseFar;
+float farShoreAt(vec2 p) {
+  vec2 d = p - uFarCenter;
+  float dist = length(d);
+  float ang = dist > 0.001 ? atan(d.y, d.x) : 0.0;
+  float u = (ang + 3.14159265) / 6.2831853;
+  float x = u * uFarCoastN;
+  float i0 = floor(x);
+  float f = x - i0;
+  float a = texelFetch(uFarCoast, ivec2(int(mod(i0, uFarCoastN)), 0), 0).r;
+  float b = texelFetch(uFarCoast, ivec2(int(mod(i0 + 1.0, uFarCoastN)), 0), 0).r;
+  return mix(a, b, f) - dist;
+}
 float shoreDistAt(vec2 p) {
+  if (uUseFar > 0.5) return farShoreAt(p);
   float dist = length(p);
   float ang = dist > 0.001 ? atan(p.y, p.x) : 0.0;
   return smoothMax(coastAt(ang) - dist, spitInside(p), 12.0);
 }
 `;
 
-function createTerrainMaterial(coastLUT, spit) {
+function createTerrainMaterial(coastLUT, spit, farLUT, farCenter, useFar) {
   const material = new THREE.MeshStandardMaterial({
     vertexColors: true,
     roughness: 0.9,
     metalness: 0
   });
-  material.customProgramCacheKey = () => 'bush-terrain-coast3';
+  material.customProgramCacheKey = () => 'bush-terrain-coast4';
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uCoast = { value: coastLUT };
     shader.uniforms.uCoastN = { value: coastLUT.image.width };
     shader.uniforms.uSpit = { value: spit };
+    shader.uniforms.uFarCoast = { value: farLUT };
+    shader.uniforms.uFarCoastN = { value: farLUT.image.width };
+    shader.uniforms.uFarCenter = { value: farCenter };
+    shader.uniforms.uUseFar = { value: useFar ? 1 : 0 };
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec3 vTerrainWorld;\nvarying vec3 vTerrainNormal;')
       .replace('#include <beginnormal_vertex>', '#include <beginnormal_vertex>\nvTerrainNormal = normalize(mat3(modelMatrix) * objectNormal);')
@@ -449,10 +470,13 @@ export class Terrain {
     ];
     this.spitVecs = this.spit.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
     this.buildCoastLUT();
+    this.placeFarIsland();
+    this.buildFarCoastLUT();
     this.profileRivers();
     this.placeLake();
 
     this.initTerrain();
+    this.initFarTerrain();
     this.initRivers();
     this.initOcean();
   }
@@ -505,6 +529,25 @@ export class Terrain {
     return this.canopyRadius(ang) + 38 + east * east * 16;
   }
 
+  // Long east-west kidney. A cove faces north, toward the home cay. Area is about twice the home cay.
+  farCoastRadius(ang) {
+    const c = Math.cos(ang);
+    const s = Math.sin(ang);
+    const rx = 254 + Math.max(0, -c) * 58;
+    const rz = 184;
+    const ellipse = (rx * rz) / Math.hypot(rz * c, rx * s);
+    const facing = Math.max(0, -s);
+    const cove = Math.pow(facing, 1.4) * (1 - Math.min(1, Math.abs(c) * 1.2)) * 74;
+    const tail = Math.max(0, s) * Math.max(0, -c) * 48;
+    const lobes = Math.sin(ang * 2 + 0.4) * 10;
+    const n = (this.fbm(c * 2.2 + 8.0, s * 2.2 - 2.0, 2) - 0.5) * 12;
+    return Math.max(96, ellipse - cove + tail + lobes + n);
+  }
+
+  farCanopyRadius(ang) {
+    return this.farCoastRadius(ang) - 36;
+  }
+
   buildCoastLUT() {
     const n = 4096;
     const data = new Float32Array(n);
@@ -520,6 +563,61 @@ export class Terrain {
     tex.colorSpace = THREE.LinearSRGBColorSpace;
     tex.needsUpdate = true;
     this.coastLUT = tex;
+  }
+
+  placeFarIsland() {
+    this.farX = 0;
+    const north = this.farCoastRadius(-Math.PI / 2);
+    let maxR = 96;
+    for (let i = 0; i < 180; i++) {
+      const r = this.farCoastRadius((i / 180) * Math.PI * 2);
+      if (r > maxR) maxR = r;
+    }
+    const gap = 380;
+    this.farZ = this.coastRadius(Math.PI / 2) + gap + north;
+    this.farReach = maxR;
+    this.farSize = Math.ceil((maxR + 110) * 2);
+    this.farSegments = Math.min(420, Math.max(80, Math.round(this.farSize / 2.25)));
+    this.farStep = this.farSize / this.farSegments;
+    this.farCenter = new THREE.Vector2(this.farX, this.farZ);
+    this.farLake = {
+      x: this.farX + 12,
+      z: this.farZ + 46,
+      rx: 54,
+      rz: 34,
+      rot: 0.5,
+      level: 1.36
+    };
+    let low = 1e9;
+    const co = Math.cos(this.farLake.rot);
+    const si = Math.sin(this.farLake.rot);
+    for (let i = 0; i < 32; i++) {
+      const a = (i / 32) * Math.PI * 2;
+      const lx = Math.cos(a) * this.farLake.rx * 1.08;
+      const lz = Math.sin(a) * this.farLake.rz * 1.08;
+      const x = this.farLake.x + lx * co - lz * si;
+      const z = this.farLake.z + lx * si + lz * co;
+      const h = this.farInlandHeight(x, z);
+      if (h < low) low = h;
+    }
+    this.farLake.level = low - 0.28;
+  }
+
+  buildFarCoastLUT() {
+    const n = 4096;
+    const data = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const ang = (i / n) * Math.PI * 2 - Math.PI;
+      data[i] = this.farCoastRadius(ang);
+    }
+    const tex = new THREE.DataTexture(data, n, 1, THREE.RedFormat, THREE.FloatType);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.minFilter = THREE.NearestFilter;
+    tex.magFilter = THREE.NearestFilter;
+    tex.colorSpace = THREE.LinearSRGBColorSpace;
+    tex.needsUpdate = true;
+    this.farCoastLUT = tex;
   }
 
   spitInside(x, z) {
@@ -785,7 +883,94 @@ export class Terrain {
     return out;
   }
 
+  farInlandHeight(x, z) {
+    const broad = this.fbm(x * 0.007 + 2.2, z * 0.007, 3);
+    const fine = this.fbm(x * 0.03 + 9, z * 0.03, 2);
+    const dz = z - this.farZ;
+    const ridge = Math.exp(-(dz * dz) / (80 * 80)) * 2.1;
+    return 3.6 + broad * 3.8 + (fine - 0.5) * 0.9 + ridge;
+  }
+
+  farLakeEllipse(x, z) {
+    const lake = this.farLake;
+    if (!lake) return 99;
+    const dx = x - lake.x;
+    const dz = z - lake.z;
+    const co = Math.cos(lake.rot);
+    const si = Math.sin(lake.rot);
+    const lx = dx * co + dz * si;
+    const lz = -dx * si + dz * co;
+    return (lx * lx) / (lake.rx * lake.rx) + (lz * lz) / (lake.rz * lake.rz);
+  }
+
+  computeFarHeight(x, z) {
+    const info = this._info;
+    const dx = x - this.farX;
+    const dz = z - this.farZ;
+    const dist = Math.hypot(dx, dz);
+    const ang = dist > 0.001 ? Math.atan2(dz, dx) : 0;
+    const canopyDist = this.farCanopyRadius(ang) - dist;
+    const shoreDist = this.farCoastRadius(ang) - dist;
+
+    info.shoreDist = shoreDist;
+    info.canopyDist = canopyDist;
+    info.onSpit = false;
+    info.beachReach = 52;
+    info.cliff = 0;
+    info.onBar = false;
+    info.clearing = 0;
+    info.forest = canopyDist > 0.4;
+    info.riverDist = 1e6;
+    info.riverT = 0;
+    info.riverIndex = -1;
+    info.lakeE = this.farLakeEllipse(x, z);
+
+    let h;
+    if (shoreDist < -70) {
+      const lip = -0.25 + (-70) * 0.16;
+      h = Math.max(-24, lip + (shoreDist + 70) * 0.22);
+    } else if (canopyDist < 1) {
+      if (shoreDist > 4) {
+        h = lerp(0.42, 1.16, smoother(4, 30, shoreDist));
+        if (shoreDist > 12) h += (this.fbm(x * 0.08 + 4, z * 0.08, 2) - 0.5) * 0.08;
+      } else {
+        const seabed = Math.max(-14, -0.25 + shoreDist * 0.16 + (this.fbm(x * 0.02, z * 0.02, 2) - 0.5) * 0.35);
+        const u = smoother(4, -16, shoreDist);
+        h = lerp(0.42, seabed, u);
+        if (h > 0.0 && h < 0.22) h = u < 0.35 ? 0.3 : Math.min(h, -0.22);
+      }
+    } else {
+      h = lerp(1.15, this.farInlandHeight(x, z), smoother(0, 22, canopyDist));
+    }
+
+    const e = info.lakeE;
+    if (e < 1.28) {
+      const surface = this.farLake.level + 0.12;
+      const bed = surface - 1.55;
+      const bowl = 1 - smoother(0.2, 0.86, e);
+      h = lerp(h, bed, bowl);
+      if (e < 0.9) h = Math.min(h, surface - 0.45);
+      const lip = smoother(0.88, 1.0, e) * (1 - smoother(1.02, 1.22, e));
+      if (lip > 0) h = lerp(h, Math.max(h, surface + 0.28), lip);
+    }
+
+    info.height = h;
+    return h;
+  }
+
   computeHeight(x, z) {
+    const farDx = x - this.farX;
+    const farDz = z - this.farZ;
+    const farDist = Math.hypot(farDx, farDz);
+    if (farDist < this.farReach + 120) {
+      const farAng = farDist > 0.001 ? Math.atan2(farDz, farDx) : 0;
+      const farShore = this.farCoastRadius(farAng) - farDist;
+      const homeDist = Math.hypot(x, z);
+      const homeAng = homeDist > 0.001 ? Math.atan2(z, x) : 0;
+      const homeShore = smoothMax(this.coastRadius(homeAng) - homeDist, this.spitInside(x, z), 12);
+      if (farShore > homeShore) return this.computeFarHeight(x, z);
+    }
+
     const info = this._info;
     const dist = Math.hypot(x, z);
     const ang = dist > 0.001 ? Math.atan2(z, x) : 0;
@@ -833,6 +1018,7 @@ export class Terrain {
   }
 
   classify(info, height) {
+    if (info.lakeE < 0.96) return 'lake';
     if (height < 0.22) return 'ocean';
     if (info.canopyDist > 0.4 && height > 0.7) return 'forest';
     if (info.shoreDist > -6 && height < 3.2) return 'sand';
@@ -840,26 +1026,38 @@ export class Terrain {
     return 'forest';
   }
 
-  getHeightAt(x, z) {
-    const half = this.size / 2;
-    if (!this.grid || x < -half || z < -half || x > half || z > half) return -24;
-    const seg = this.segments;
-    const fx = (x + half) / this.step;
-    const fz = (z + half) / this.step;
+  sampleHeight(grid, size, segments, originX, originZ, x, z) {
+    if (!grid) return null;
+    const half = size / 2;
+    const lx = x - originX;
+    const lz = z - originZ;
+    if (lx < -half || lz < -half || lx > half || lz > half) return null;
+    const step = size / segments;
+    const fx = (lx + half) / step;
+    const fz = (lz + half) / step;
     let x0 = Math.floor(fx);
     let z0 = Math.floor(fz);
     if (x0 < 0) x0 = 0;
     if (z0 < 0) z0 = 0;
-    if (x0 >= seg) x0 = seg - 1;
-    if (z0 >= seg) z0 = seg - 1;
+    if (x0 >= segments) x0 = segments - 1;
+    if (z0 >= segments) z0 = segments - 1;
     const tx = Math.min(1, fx - x0);
     const tz = Math.min(1, fz - z0);
-    const stride = seg + 1;
-    const h00 = this.grid[z0 * stride + x0];
-    const h10 = this.grid[z0 * stride + x0 + 1];
-    const h01 = this.grid[(z0 + 1) * stride + x0];
-    const h11 = this.grid[(z0 + 1) * stride + x0 + 1];
+    const stride = segments + 1;
+    const h00 = grid[z0 * stride + x0];
+    const h10 = grid[z0 * stride + x0 + 1];
+    const h01 = grid[(z0 + 1) * stride + x0];
+    const h11 = grid[(z0 + 1) * stride + x0 + 1];
     return lerp(lerp(h00, h10, tx), lerp(h01, h11, tx), tz);
+  }
+
+  getHeightAt(x, z) {
+    const home = this.sampleHeight(this.grid, this.size, this.segments, 0, 0, x, z);
+    const far = this.sampleHeight(this.farGrid, this.farSize, this.farSegments, this.farX, this.farZ, x, z);
+    if (home == null && far == null) return -24;
+    if (home == null) return far;
+    if (far == null) return home;
+    return home > far ? home : far;
   }
 
   slopeAt(x, z) {
@@ -900,6 +1098,13 @@ export class Terrain {
     if (this.lake && info.lakeE < 0.98) {
       const level = this.lake.level + 0.12;
       if (bed < level - 0.02) {
+        surface = level;
+        kind = 'lake';
+      }
+    }
+    if (this.farLake && info.lakeE < 0.98) {
+      const level = this.farLake.level + 0.12;
+      if (bed < level - 0.02 && level > surface) {
         surface = level;
         kind = 'lake';
       }
@@ -1039,19 +1244,19 @@ export class Terrain {
     return { accel: 0.86, brake: 0.92, soft: false };
   }
 
-  slopeFromGrid(ix, iz) {
-    const seg = this.segments;
+  slopeFromGrid(ix, iz, grid = this.grid, segments = this.segments, step = this.step) {
+    const seg = segments;
     const stride = seg + 1;
     const x0 = Math.max(0, ix - 1);
     const x1 = Math.min(seg, ix + 1);
     const z0 = Math.max(0, iz - 1);
     const z1 = Math.min(seg, iz + 1);
-    const hL = this.grid[iz * stride + x0];
-    const hR = this.grid[iz * stride + x1];
-    const hD = this.grid[z0 * stride + ix];
-    const hU = this.grid[z1 * stride + ix];
-    const dx = Math.max(1, (x1 - x0) * this.step);
-    const dz = Math.max(1, (z1 - z0) * this.step);
+    const hL = grid[iz * stride + x0];
+    const hR = grid[iz * stride + x1];
+    const hD = grid[z0 * stride + ix];
+    const hU = grid[z1 * stride + ix];
+    const dx = Math.max(1, (x1 - x0) * step);
+    const dz = Math.max(1, (z1 - z0) * step);
     return Math.hypot((hR - hL) / dx, (hU - hD) / dz);
   }
 
@@ -1071,7 +1276,7 @@ export class Terrain {
     } else if (kind === 'forest') {
       mix3([0.07, 0.12, 0.05], [0.12, 0.18, 0.07], n, out);
     } else if (kind === 'lake') {
-      mix3([0.16, 0.42, 0.4], [0.1, 0.28, 0.3], clamp01(h / 8), out);
+      mix3([0.07, 0.14, 0.09], [0.05, 0.11, 0.08], 0.45, out);
     } else if (kind === 'river') {
       mix3([0.42, 0.38, 0.3], [0.18, 0.4, 0.42], 0.62, out);
     } else if (kind === 'rock') {
@@ -1089,14 +1294,15 @@ export class Terrain {
     return out;
   }
 
-  initTerrain() {
-    const geometry = new THREE.PlaneGeometry(this.size, this.size, this.segments, this.segments);
+  buildLandMesh(originX, originZ, size, segments, useFar) {
+    const step = size / segments;
+    const geometry = new THREE.PlaneGeometry(size, size, segments, segments);
     geometry.rotateX(-Math.PI / 2);
 
-    const stride = this.segments + 1;
+    const stride = segments + 1;
     const count = stride * stride;
-    this.grid = new Float32Array(count);
-    this.grid.fill(-24);
+    const grid = new Float32Array(count);
+    grid.fill(-24);
     const shoreGrid = new Float32Array(count);
     const cliffGrid = new Float32Array(count);
     const riverDistGrid = new Float32Array(count);
@@ -1105,17 +1311,21 @@ export class Terrain {
     const clearGrid = new Float32Array(count);
     const flagGrid = new Uint8Array(count);
 
-    const half = this.size / 2;
+    const half = size / 2;
     const pos = geometry.attributes.position;
     for (let i = 0; i < pos.count; i++) {
-      const x = pos.getX(i);
-      const z = pos.getZ(i);
+      const x = pos.getX(i) + originX;
+      const z = pos.getZ(i) + originZ;
+      if (originX !== 0 || originZ !== 0) {
+        pos.setX(i, x);
+        pos.setZ(i, z);
+      }
       const h = this.computeHeight(x, z);
       pos.setY(i, h);
-      const ix = Math.round((x + half) / this.step);
-      const iz = Math.round((z + half) / this.step);
+      const ix = Math.round((x - originX + half) / step);
+      const iz = Math.round((z - originZ + half) / step);
       const g = iz * stride + ix;
-      this.grid[g] = h;
+      grid[g] = h;
       const info = this._info;
       shoreGrid[g] = info.shoreDist;
       cliffGrid[g] = info.cliff;
@@ -1123,32 +1333,40 @@ export class Terrain {
       riverTGrid[g] = info.riverT;
       beachGrid[g] = info.beachReach;
       clearGrid[g] = info.clearing;
-      flagGrid[g] = (info.onBar ? 1 : 0) | (info.forest ? 2 : 0);
+      flagGrid[g] = (info.onBar ? 1 : 0) | (info.forest ? 2 : 0) | (info.lakeE < 0.96 ? 4 : 0);
     }
     pos.needsUpdate = true;
+    if (!useFar) this.grid = grid;
 
     const colors = new Float32Array(pos.count * 3);
     const col = this._color;
-    this.kindGrid = new Uint8Array(count);
+    const kindGrid = new Uint8Array(count);
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i);
       const z = pos.getZ(i);
-      const ix = Math.min(this.segments, Math.max(0, Math.round((x + half) / this.step)));
-      const iz = Math.min(this.segments, Math.max(0, Math.round((z + half) / this.step)));
+      const ix = Math.min(segments, Math.max(0, Math.round((x - originX + half) / step)));
+      const iz = Math.min(segments, Math.max(0, Math.round((z - originZ + half) / step)));
       const g = iz * stride + ix;
       const info = this._info;
-      info.shoreDist = shoreGrid[g];
-      info.cliff = cliffGrid[g];
-      info.riverDist = riverDistGrid[g];
-      info.riverT = riverTGrid[g];
-      info.beachReach = beachGrid[g];
-      info.clearing = clearGrid[g];
-      info.onBar = (flagGrid[g] & 1) !== 0;
-      info.forest = (flagGrid[g] & 2) !== 0;
+      if (useFar) {
+        this.computeHeight(x, z);
+      } else {
+        info.shoreDist = shoreGrid[g];
+        info.cliff = cliffGrid[g];
+        info.riverDist = riverDistGrid[g];
+        info.riverT = riverTGrid[g];
+        info.beachReach = beachGrid[g];
+        info.clearing = clearGrid[g];
+        info.onBar = (flagGrid[g] & 1) !== 0;
+        info.forest = (flagGrid[g] & 2) !== 0;
+        info.lakeE = (flagGrid[g] & 4) !== 0 ? 0 : 99;
+      }
       const h = pos.getY(i);
-      const slope = this.slopeFromGrid(ix, iz);
+      const slope = useFar
+        ? this.slopeFromGrid(ix, iz, grid, segments, step)
+        : this.slopeFromGrid(ix, iz);
       const kind = this.classify(info, h, slope);
-      this.kindGrid[g] = kind === 'forest' ? 1 : kind === 'grass' ? 2 : 0;
+      kindGrid[g] = kind === 'forest' ? 1 : kind === 'grass' ? 2 : 0;
       this.colorFor(kind, h, slope, x, z, col);
       colors[i * 3] = col[0];
       colors[i * 3 + 1] = col[1];
@@ -1160,11 +1378,31 @@ export class Terrain {
     geometry.computeBoundingSphere();
     geometry.computeBoundingBox();
 
-    const terrainMaterial = createTerrainMaterial(this.coastLUT, this.spitVecs);
+    const terrainMaterial = createTerrainMaterial(
+      this.coastLUT,
+      this.spitVecs,
+      this.farCoastLUT,
+      this.farCenter,
+      useFar
+    );
+    const mesh = new THREE.Mesh(geometry, terrainMaterial);
+    mesh.receiveShadow = true;
+    this.scene.add(mesh);
+    return { grid, kindGrid, mesh };
+  }
 
-    this.mesh = new THREE.Mesh(geometry, terrainMaterial);
-    this.mesh.receiveShadow = true;
-    this.scene.add(this.mesh);
+  initTerrain() {
+    const built = this.buildLandMesh(0, 0, this.size, this.segments, false);
+    this.grid = built.grid;
+    this.kindGrid = built.kindGrid;
+    this.mesh = built.mesh;
+  }
+
+  initFarTerrain() {
+    const built = this.buildLandMesh(this.farX, this.farZ, this.farSize, this.farSegments, true);
+    this.farGrid = built.grid;
+    this.farKindGrid = built.kindGrid;
+    this.farMesh = built.mesh;
   }
 
   initRivers() {
@@ -1278,20 +1516,24 @@ export class Terrain {
 
   setDaylight(sunDir, daylight) {
     if (this.oceanUniforms && this.oceanUniforms.uDay) this.oceanUniforms.uDay.value = daylight;
-    const lake = this.lakeMesh;
-    if (!lake || !lake.material.uniforms) return;
-    const uniforms = lake.material.uniforms;
-    if (uniforms.sunDirection) uniforms.sunDirection.value.copy(sunDir);
-    if (uniforms.sunColor) {
-      if (!this._lakeDaySun) {
-        this._lakeDaySun = new THREE.Color(0x9eb4c4);
-        this._lakeNightSun = new THREE.Color(0x1a2744);
+    if (this.pondUniforms && this.pondUniforms.uDay) this.pondUniforms.uDay.value = daylight;
+    const lakes = [this.lakeMesh, this.farLakeMesh];
+    for (let i = 0; i < lakes.length; i++) {
+      const lake = lakes[i];
+      if (!lake || !lake.material.uniforms) continue;
+      const uniforms = lake.material.uniforms;
+      if (uniforms.sunDirection) uniforms.sunDirection.value.copy(sunDir);
+      if (uniforms.sunColor) {
+        if (!this._lakeDaySun) {
+          this._lakeDaySun = new THREE.Color(0x9eb4c4);
+          this._lakeNightSun = new THREE.Color(0x1a2744);
+        }
+        uniforms.sunColor.value.copy(this._lakeNightSun).lerp(this._lakeDaySun, daylight);
       }
-      uniforms.sunColor.value.copy(this._lakeNightSun).lerp(this._lakeDaySun, daylight);
     }
   }
 
-  makeWater(geometry, size, distortion) {
+  makeWater(geometry, size, distortion, color) {
     const sun = new THREE.Vector3(210, 120, 60).normalize();
     const water = new Water(geometry, {
       textureWidth: 512,
@@ -1299,7 +1541,7 @@ export class Terrain {
       waterNormals: this.waterNormals(),
       sunDirection: sun,
       sunColor: 0x9eb4c4,
-      waterColor: 0x1a9a9a,
+      waterColor: color == null ? 0x1a9a9a : color,
       distortionScale: distortion,
       fog: true
     });
@@ -1343,13 +1585,17 @@ export class Terrain {
   initOcean() {
     const geo = new THREE.PlaneGeometry(36000, 36000, 1, 1);
     const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, fog: true });
-    mat.customProgramCacheKey = () => 'bush-lagoon';
+    mat.customProgramCacheKey = () => 'bush-lagoon-far';
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uTime = { value: 0 };
       shader.uniforms.uDay = { value: 1 };
       shader.uniforms.uCoast = { value: this.coastLUT };
       shader.uniforms.uCoastN = { value: this.coastLUT.image.width };
       shader.uniforms.uSpit = { value: this.spitVecs };
+      shader.uniforms.uFarCoast = { value: this.farCoastLUT };
+      shader.uniforms.uFarCoastN = { value: this.farCoastLUT.image.width };
+      shader.uniforms.uFarCenter = { value: this.farCenter };
+      shader.uniforms.uUseFar = { value: 0 };
       this.oceanUniforms = shader.uniforms;
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', '#include <common>\nvarying vec3 vOceanWorld;')
@@ -1358,6 +1604,7 @@ export class Terrain {
         .replace('#include <common>', `#include <common>\nvarying vec3 vOceanWorld;\nuniform float uTime;\nuniform float uDay;\n${COAST_GLSL}`)
         .replace('#include <color_fragment>', `
           vec2 xz = vOceanWorld.xz;
+          if (farShoreAt(xz) > 0.35) discard;
           float shore = shoreDistAt(xz);
           float depth = clamp(-shore / 70.0, 0.0, 1.0);
           vec3 col = mix(vec3(0.16, 0.62, 0.64), vec3(0.07, 0.40, 0.52), smoothstep(0.0, 0.4, depth));
@@ -1381,6 +1628,7 @@ export class Terrain {
     this.ocean.renderOrder = 2;
     this.scene.add(this.ocean);
     this.initLake();
+    this.initFarLake();
   }
 
   initLake() {
@@ -1399,6 +1647,92 @@ export class Terrain {
     this.lakeMesh = this.makeWater(geo, 0.12, 4.2);
     this.lakeMesh.position.set(lake.x, lake.level + 0.12, lake.z);
     this.scene.add(this.lakeMesh);
+  }
+
+  initFarLake() {
+    const lake = this.farLake;
+    if (!lake) return;
+    const geo = new THREE.CircleGeometry(1, 64);
+    const pos = geo.attributes.position;
+    const co = Math.cos(lake.rot);
+    const si = Math.sin(lake.rot);
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i) * lake.rx;
+      const y = pos.getY(i) * lake.rz;
+      pos.setXY(i, x * co - y * si, -(x * si + y * co));
+    }
+    pos.needsUpdate = true;
+    const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, fog: true });
+    mat.customProgramCacheKey = () => 'bush-pond';
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = { value: 0 };
+      shader.uniforms.uDay = { value: 1 };
+      this.pondUniforms = shader.uniforms;
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nvarying vec3 vPondWorld;')
+        .replace('#include <project_vertex>', 'vPondWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\n#include <project_vertex>');
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nvarying vec3 vPondWorld;\nuniform float uTime;\nuniform float uDay;')
+        .replace('#include <color_fragment>', `
+          vec2 xz = vPondWorld.xz;
+          float rip = sin(xz.x * 0.31 + uTime * 0.55) * sin(xz.y * 0.27 - uTime * 0.4);
+          vec3 col = vec3(0.09, 0.40, 0.36);
+          col += vec3(0.025, 0.04, 0.03) * rip;
+          col *= mix(0.1, 1.0, uDay);
+          diffuseColor.rgb = col;`);
+    };
+    this.farLakeMesh = new THREE.Mesh(geo, mat);
+    this.farLakeMesh.rotation.x = -Math.PI / 2;
+    this.farLakeMesh.position.set(lake.x, lake.level + 0.12, lake.z);
+    this.farLakeMesh.scale.set(1.04, 1.04, 1);
+    this.farLakeMesh.renderOrder = 2;
+    this.farLakeMesh.receiveShadow = false;
+    this.scene.add(this.farLakeMesh);
+    this.initLilyPads();
+  }
+
+  initLilyPads() {
+    const lake = this.farLake;
+    if (!lake) return;
+    const geo = new THREE.CircleGeometry(1, 8);
+    const ring = geo.attributes.position;
+    ring.setXY(1, 0.12, 0.02);
+    geo.computeVertexNormals();
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 0.82,
+      metalness: 0,
+      side: THREE.DoubleSide
+    });
+    const count = 24;
+    const mesh = new THREE.InstancedMesh(geo, mat, count);
+    const rng = mulberry32(0x11a9d);
+    const dummy = new THREE.Object3D();
+    const color = new THREE.Color();
+    const co = Math.cos(lake.rot);
+    const si = Math.sin(lake.rot);
+    const surface = lake.level + 0.12;
+    let n = 0;
+    for (let i = 0; i < 90 && n < count; i++) {
+      const a = rng() * Math.PI * 2;
+      const u = Math.sqrt(rng()) * 0.78;
+      const lx = Math.cos(a) * lake.rx * u;
+      const lz = Math.sin(a) * lake.rz * u;
+      const x = lake.x + lx * co - lz * si;
+      const z = lake.z + lx * si + lz * co;
+      const s = 0.65 + rng() * 1.15;
+      dummy.position.set(x, surface + 0.04, z);
+      dummy.rotation.set(-Math.PI / 2, 0, rng() * Math.PI * 2);
+      dummy.scale.set(s, s, s);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(n, dummy.matrix);
+      color.setRGB(0.1 + rng() * 0.06, 0.32 + rng() * 0.16, 0.08 + rng() * 0.04);
+      mesh.setColorAt(n, color);
+      n++;
+    }
+    mesh.count = n;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    this.finishInstances(mesh);
   }
 
   finishInstances(mesh) {
@@ -1519,8 +1853,8 @@ export class Terrain {
           z = c.z + (rng() - 0.5) * c.rz * 2.3;
         } else {
           const sample = this.sampleDisc(rng, radius);
-          x = sample[0];
-          z = sample[1];
+          x = sample[0] + (options.ox || 0);
+          z = sample[1] + (options.oz || 0);
         }
         const surface = this.getSurfaceAt(x, z);
         const scale = accept(surface, x, z, rng);
@@ -1661,6 +1995,33 @@ export class Terrain {
     plant('CoconutHalf', 24, 140, (s, _x, _z, r) => (s.kind === 'forest' ? 0.8 + r() * 0.35 : 0));
     plant('Pineapple', 30, 130, (s, _x, _z, r) => (s.kind === 'forest' ? 0.85 + r() * 0.35 : 0));
 
+    const farPlace = { ox: this.farX, oz: this.farZ };
+    const farR = this.farReach + 12;
+    const farTree = { ...tree, ...farPlace };
+    plant('JungleTree01', 360, farR, jungle, farTree);
+    plant('JungleTree02', 280, farR, jungle, farTree);
+    plant('BananaTree01', 70, farR, (s, _x, _z, r) => (forestTree(s) ? 1.7 + r() * 0.7 : 0), farTree);
+    plant('Palm01', 46, farR, palm, farTree);
+    plant('Palm02', 36, farR, palm, farTree);
+    plant('Palm03', 22, farR, palm, farTree);
+    plant('TropicalPlant01', 140, farR, understory, farPlace);
+    plant('TropicalPlant02', 110, farR, understory, farPlace);
+    plant('TropicalFlower01', 70, farR, (s, _x, _z, r) => (s.kind === 'forest' ? 0.85 + r() * 0.4 : 0), farPlace);
+    for (const name of ['Icosphere', 'Icosphere.001', 'Icosphere.002', 'Icosphere.003']) {
+      plant(name, 2, farR, (s, x, z, r) => stoneHere(s, x, z, r), {
+        tries: 24,
+        solid: true,
+        ox: this.farX,
+        oz: this.farZ,
+        color: stoneColor,
+        sink: (scale) => scale * 0.18,
+        orient: (obj, _s, _x, _z, r) => {
+          obj.rotation.set((r() - 0.5) * 0.35, r() * Math.PI * 2, (r() - 0.5) * 0.35);
+        },
+        stretch: (r) => 0.72 + r() * 0.5
+      });
+    }
+
     this.scatterStaticGrass(props);
     this.buildCliffCoast(props);
 
@@ -1767,6 +2128,52 @@ export class Terrain {
     this.finishInstances(broadTrunk);
     this.finishInstances(broadCrown);
 
+    const farConiferTops = new THREE.InstancedMesh(coniferGeo, coniferMat, 240);
+    const farTrunks = new THREE.InstancedMesh(trunkGeo, trunkMat, 240);
+    const farBroads = new THREE.InstancedMesh(broadTrunkGeo, trunkMat, 160);
+    const farCrowns = new THREE.InstancedMesh(crownGeo, crownMat, 160);
+    let farConiferN = 0;
+    let farBroadN = 0;
+    for (let n = 0; n < 5000 && (farConiferN < 240 || farBroadN < 160); n++) {
+      const sample = this.sampleDisc(rng, this.farReach);
+      const x = sample[0] + this.farX;
+      const z = sample[1] + this.farZ;
+      const surface = this.getSurfaceAt(x, z);
+      if (surface.kind !== 'forest' || surface.height < 0.85 || surface.slope > 0.55) continue;
+      const scale = 0.85 + rng() * 1.15;
+      dummy.position.set(x, surface.height, z);
+      dummy.rotation.set(0, rng() * Math.PI * 2, 0);
+      dummy.scale.set(scale, scale * (0.85 + rng() * 0.35), scale);
+      dummy.updateMatrix();
+      if (rng() < 0.6 && farConiferN < 240) {
+        farTrunks.setMatrixAt(farConiferN, dummy.matrix);
+        farConiferTops.setMatrixAt(farConiferN, dummy.matrix);
+        coniferColor.setRGB(0.1 + rng() * 0.06, 0.28 + rng() * 0.12, 0.08);
+        farConiferTops.setColorAt(farConiferN, coniferColor);
+        farConiferN++;
+        this.noteSolid(x, z, Math.min(0.7, Math.max(0.45, 0.32 * scale)), surface.height + 3.1 * dummy.scale.y);
+        this.canopy.push({ x, z, r: 1.8 * scale, top: surface.height + 6.2 * scale });
+      } else if (farBroadN < 160) {
+        farBroads.setMatrixAt(farBroadN, dummy.matrix);
+        farCrowns.setMatrixAt(farBroadN, dummy.matrix);
+        broadColor.setRGB(0.18 + rng() * 0.1, 0.36 + rng() * 0.12, 0.1);
+        farCrowns.setColorAt(farBroadN, broadColor);
+        farBroadN++;
+        this.noteSolid(x, z, Math.min(0.7, Math.max(0.45, 0.32 * scale)), surface.height + 2.4 * dummy.scale.y);
+        this.canopy.push({ x, z, r: 1.8 * scale, top: surface.height + 5.4 * scale });
+      }
+    }
+    farTrunks.count = farConiferN;
+    farConiferTops.count = farConiferN;
+    farBroads.count = farBroadN;
+    farCrowns.count = farBroadN;
+    if (farConiferTops.instanceColor) farConiferTops.instanceColor.needsUpdate = true;
+    if (farCrowns.instanceColor) farCrowns.instanceColor.needsUpdate = true;
+    this.finishInstances(farTrunks);
+    this.finishInstances(farConiferTops);
+    this.finishInstances(farBroads);
+    this.finishInstances(farCrowns);
+
     const rockGeo = new THREE.DodecahedronGeometry(1, 0);
     const rockMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.96 });
     const rockCount = 40;
@@ -1834,6 +2241,29 @@ export class Terrain {
     grass.count = grassN;
     if (grass.instanceColor) grass.instanceColor.needsUpdate = true;
     this.finishInstances(grass);
+
+    const farGrass = new THREE.InstancedMesh(grassGeo, grassMat, 4000);
+    let farN = 0;
+    for (let n = 0; n < 6000 && farN < 4000; n++) {
+      const sample = this.sampleDisc(rng, this.farReach);
+      const x = sample[0] + this.farX;
+      const z = sample[1] + this.farZ;
+      const surface = this.getSurfaceAt(x, z);
+      if (surface.canopyDist < 0.8 || surface.height < 0.6 || surface.slope > 0.45) continue;
+      if (surface.kind === 'lake' || surface.kind === 'ocean' || surface.kind === 'sand') continue;
+      const scale = 0.85 + rng() * 0.9;
+      dummy.position.set(x, surface.height, z);
+      dummy.rotation.set(0, rng() * Math.PI, 0);
+      dummy.scale.set(scale, scale, scale);
+      dummy.updateMatrix();
+      farGrass.setMatrixAt(farN, dummy.matrix);
+      grassColor.setRGB(0.22 + rng() * 0.16, 0.45 + rng() * 0.22, 0.12);
+      farGrass.setColorAt(farN, grassColor);
+      farN++;
+    }
+    farGrass.count = farN;
+    if (farGrass.instanceColor) farGrass.instanceColor.needsUpdate = true;
+    this.finishInstances(farGrass);
   }
 
   scatterStaticGrass(props) {
@@ -1889,6 +2319,84 @@ export class Terrain {
               (code === 1 ? 0.66 : 0.76) + lift * 0.65,
               0.11 + n * 0.04
             );
+            buckets[vi].matrices.push(dummy.matrix.clone());
+            buckets[vi].colors.push(tint.clone());
+          }
+        }
+        const meshes = [];
+        for (let v = 0; v < variants.length; v++) {
+          const list = buckets[v].matrices;
+          if (!list.length) continue;
+          for (const part of variants[v].parts) {
+            const mesh = new THREE.InstancedMesh(part.geometry, part.material, list.length);
+            for (let i = 0; i < list.length; i++) {
+              mesh.setMatrixAt(i, list[i]);
+              mesh.setColorAt(i, buckets[v].colors[i]);
+            }
+            mesh.instanceMatrix.needsUpdate = true;
+            if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+            mesh.castShadow = false;
+            mesh.receiveShadow = false;
+            mesh.computeBoundingSphere();
+            mesh.layers.set(1);
+            mesh.visible = false;
+            this.scene.add(mesh);
+            meshes.push(mesh);
+          }
+        }
+        if (meshes.length) this.grassChunks.push({ x: cx + chunk * 0.5, z: cz + chunk * 0.5, meshes });
+      }
+    }
+    this.scatterFarGrass(variants);
+  }
+
+  scatterFarGrass(variants) {
+    if (!variants.length || !this.farKindGrid) return;
+    if (!this.grassChunks) this.grassChunks = [];
+    const chunk = 70;
+    const reach = this.farReach;
+    const step = 1.9;
+    const half = this.farSize / 2;
+    const stride = this.farSegments + 1;
+    const dummy = new THREE.Object3D();
+    const tint = new THREE.Color();
+    const originX = this.farX;
+    const originZ = this.farZ;
+
+    for (let cz = originZ - reach; cz < originZ + reach; cz += chunk) {
+      for (let cx = originX - reach; cx < originX + reach; cx += chunk) {
+        const mx = cx + chunk * 0.5 - originX;
+        const mz = cz + chunk * 0.5 - originZ;
+        if (mx * mx + mz * mz > (reach + chunk) * (reach + chunk)) continue;
+        const buckets = variants.map(() => ({ matrices: [], colors: [] }));
+        for (let z = cz; z < cz + chunk; z += step) {
+          for (let x = cx; x < cx + chunk; x += step) {
+            const ix = Math.floor(x / step);
+            const iz = Math.floor(z / step);
+            const n = this.hash(ix, iz);
+            const px = x + (n - 0.5) * step * 0.7;
+            const pz = z + (this.hash(ix + 3, iz - 5) - 0.5) * step * 0.7;
+            const dx = px - originX;
+            const dz = pz - originZ;
+            const edge = this.farCanopyRadius(Math.atan2(dz, dx)) - Math.hypot(dx, dz);
+            if (edge < 0.8) continue;
+            const gx = Math.min(this.farSegments, Math.max(0, Math.round((dx + half) / this.farStep)));
+            const gz = Math.min(this.farSegments, Math.max(0, Math.round((dz + half) / this.farStep)));
+            const code = this.farKindGrid[gz * stride + gx];
+            if (this.slopeFromGrid(gx, gz, this.farGrid, this.farSegments, this.farStep) > 0.48) continue;
+            const h = this.getHeightAt(px, pz);
+            if (h < 0.65 || code !== 1) continue;
+            if (n < 0.06) continue;
+            const vi = Math.abs((Math.imul(ix, 13) + Math.imul(iz, 29)) % variants.length);
+            const prop = variants[vi];
+            const heightScale = Math.min(1.05, (0.5 + n * 0.22) * (0.68 / Math.max(prop.spanY, 0.5)));
+            const widthScale = heightScale * (code === 1 ? 1.7 : 1.15);
+            dummy.position.set(px, h - 0.02, pz);
+            dummy.rotation.set(0, n * Math.PI * 2, 0);
+            dummy.scale.set(widthScale, heightScale * (0.85 + this.hash(ix, iz + 4) * 0.25), widthScale);
+            dummy.updateMatrix();
+            const lift = n * 0.12;
+            tint.setRGB(0.42 + lift, 0.66 + lift * 0.65, 0.11 + n * 0.04);
             buckets[vi].matrices.push(dummy.matrix.clone());
             buckets[vi].colors.push(tint.clone());
           }
@@ -2026,8 +2534,10 @@ export class Terrain {
   flightCeiling() {
     if (this._ceiling) return this._ceiling;
     let top = 30;
-    const grid = this.grid;
-    if (grid) {
+    const grids = [this.grid, this.farGrid];
+    for (let g = 0; g < grids.length; g++) {
+      const grid = grids[g];
+      if (!grid) continue;
       for (let i = 0; i < grid.length; i++) if (grid[i] > top) top = grid[i];
     }
     const canopy = this.canopy;
@@ -2105,7 +2615,8 @@ export class Terrain {
     this.oceanTime += delta;
     grassContact.time.value = this.oceanTime;
     if (this.oceanUniforms) this.oceanUniforms.uTime.value = this.oceanTime;
-    if (this.lakeMesh && this.lakeMesh.material.uniforms.time) {
+    if (this.pondUniforms) this.pondUniforms.uTime.value = this.oceanTime;
+    if (this.lakeMesh && this.lakeMesh.material.uniforms && this.lakeMesh.material.uniforms.time) {
       this.lakeMesh.material.uniforms.time.value = this.oceanTime;
     }
     if (this.riverNormals) this.riverNormals.offset.y = this.oceanTime * 0.05;

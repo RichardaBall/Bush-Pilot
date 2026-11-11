@@ -14,7 +14,7 @@ Do these one chat at a time. Each row is one Agent request. You check the matchi
 
 ## Later
 
-5. **Second island.** Stamp the same island recipe a few kilometers away on open water. One mesh, one scatter, empty sea between. Fly there using a coordinate written in this file after the first island still spawns correctly. Do not start this until 1–4 are done or explicitly skipped.
+5. **Second island.** Done. South of the home cay, open water between. From the south beach the near shore is about 400 m out. Center is about (0, 633). It is a longer kidney shape, about twice the land of the home cay, with a cove on the north side and a freshwater pond inland of that cove. Home spawn is unchanged.
 
 ## Not in scope unless you ask
 

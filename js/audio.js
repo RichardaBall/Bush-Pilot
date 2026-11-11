@@ -142,7 +142,7 @@ export class Soundscape {
   burst(opts) {
     if (!this.ready) return;
     const ctx = this.ctx;
-    const now = ctx.currentTime;
+    const now = ctx.currentTime + (opts.delay || 0);
     const dur = opts.dur;
     const gain = ctx.createGain();
     gain.gain.setValueAtTime(0.0001, now);
@@ -273,6 +273,30 @@ export class Soundscape {
       cut: 1600,
       cutTo: 400,
       q: 0.6
+    });
+  }
+
+  chirp(gain = 1, shorten = 1) {
+    const peak = Math.max(0.004, 0.05 * gain);
+    const dur = 0.08 * shorten;
+    this.burst({
+      tone: true,
+      wave: 'sine',
+      freq: 1480,
+      freqTo: 1960,
+      dur,
+      attack: 0.005,
+      peak
+    });
+    this.burst({
+      tone: true,
+      wave: 'sine',
+      freq: 2140,
+      freqTo: 1620,
+      dur: dur * 0.75,
+      attack: 0.004,
+      peak: peak * 0.72,
+      delay: dur * 0.9
     });
   }
 }

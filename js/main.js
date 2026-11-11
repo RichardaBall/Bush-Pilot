@@ -22,6 +22,7 @@ import { WaterBarrel } from './barrel.js';
 import { Weather } from './weather.js';
 import { FishingRod } from './rod.js';
 import { CarBattery } from './battery.js';
+import { Birds } from './birds.js';
 
 const FISH_ROT = 90;
 const FISH_PICK = 1.5;
@@ -378,6 +379,7 @@ class Game {
     if (natureScene) this.terrain.scatterNature(natureScene, packs);
     else this.terrain.initProps();
     this.terrain.scatterClouds(cloudScene);
+    this.birds = new Birds(this.scene, this.terrain, this.audio);
     const [humanMesh, smurfMesh, campMesh] = await Promise.all([
       loader.loadHuman().catch(() => loader.createHumanAvatar()),
       loader.loadSmurf().catch((err) => {
@@ -594,6 +596,8 @@ class Game {
         this.uiPrompt.innerText = this.gearPrompt(here) + extra;
       } else if (this.heldFish) {
         this.uiPrompt.innerText = 'Raw fish in hand. Click a lit campfire to cook it. Any other click drops it.';
+      } else if (this.canDrinkPond()) {
+        this.uiPrompt.innerText = 'Press [E] to drink.';
       } else if (nearPlane && panelOut) {
         this.uiPrompt.innerText = packPrompt(false);
       } else if (this.lamp && this.lamp.charge <= 0) {
@@ -782,6 +786,11 @@ class Game {
         : `Aim ${name}. Mouse forward and back sets distance. Scroll rotates. Click to place. ${spot.reason}`;
     }
     if (this.fire) this.fire.update(delta);
+    if (this.birds && this.player && this.aircraft) {
+      const focus = onFoot ? this.player.position : this.aircraft.position;
+      const rain = this.weather ? this.weather.amount : 0;
+      this.birds.update(delta, focus, onFoot, this.daylight, rain, this.fire, this.aircraft);
+    }
     if (this.solar && this.player) this.solar.update(this.player);
     if (this.turbine && this.player) {
       const windSpot = this.turbine.spot();
@@ -983,7 +992,10 @@ class Game {
       this.pickupFish(lying.item);
       return;
     }
-    if (!here) return;
+    if (!here) {
+      if (this.canDrinkPond()) this.drinkPond();
+      return;
+    }
     this.wireNote = '';
     if (here.kind === 'rod' && this.rod.caught && !this.heldFish && this.rod.takeFish()) {
       this.heldFish = true;
@@ -1032,6 +1044,25 @@ class Game {
       this.aircraft.airborne = false;
       this.buildOpen = false;
     }
+  }
+
+  canDrinkPond() {
+    if (!this.player || !this.terrain || !this.field || this.field.thirst >= 99) return false;
+    const yaw = this.player.mesh.rotation.y;
+    const spots = [
+      [this.player.position.x, this.player.position.z],
+      [this.player.position.x + Math.sin(yaw) * 1.2, this.player.position.z + Math.cos(yaw) * 1.2]
+    ];
+    for (let i = 0; i < spots.length; i++) {
+      const water = this.terrain.waterAt(spots[i][0], spots[i][1]);
+      if (water.kind === 'lake' && water.depth > 0.12) return true;
+    }
+    return false;
+  }
+
+  drinkPond() {
+    this.field.drink();
+    this.audio.pour();
   }
 
   cookFish() {

@@ -50,6 +50,13 @@ Serve the folder (any static server), open `index.html`, click the canvas once s
 - [ ] Middle mouse, Attach wire. Left click the parked plane or a placed battery. Lamp climbs and that charge falls. Walking away, boarding, or middle mouse stops it.
 - [ ] At the placed tent, press E, then left click the parked plane or a placed battery. At night the inside of the tent lights and that charge falls. The battery drains faster than the plane. In daylight the cable can stay plugged and the tent stays dark. Press E to unplug. Packing the tent, or rolling the plane, drops the lead.
 
+**Birds** (`birds.js`, `audio.js`, `main.js`)
+
+- [ ] On the south beach by day, gulls circle a few meters up and their wings move.
+- [ ] Walk up to one: it climbs and settles farther along the shore. A low pass in the plane does the same.
+- [ ] Light the campfire. Two gulls drift into a ring around it, still above head height. Put the fire out and they return to the beach.
+- [ ] A short chirp plays when you are near them by day. It is quieter in rain, and it is gone at night while they sit low.
+
 **Sound** (`audio.js`, `groundfx.js`)
 
 - [ ] Wind is quieter under trees than on the open beach, and fades in the plane.
