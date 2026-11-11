@@ -23,6 +23,7 @@ import { Weather } from './weather.js';
 import { FishingRod } from './rod.js';
 import { CarBattery } from './battery.js';
 import { Birds } from './birds.js';
+import { Fish } from './fish.js';
 
 const FISH_ROT = 90;
 const FISH_PICK = 1.5;
@@ -380,6 +381,7 @@ class Game {
     else this.terrain.initProps();
     this.terrain.scatterClouds(cloudScene);
     this.birds = new Birds(this.scene, this.terrain, this.audio);
+    this.fishLife = new Fish(this.scene, this.terrain, this.audio);
     const [humanMesh, smurfMesh, campMesh] = await Promise.all([
       loader.loadHuman().catch(() => loader.createHumanAvatar()),
       loader.loadSmurf().catch((err) => {
@@ -790,6 +792,7 @@ class Game {
       const focus = onFoot ? this.player.position : this.aircraft.position;
       const rain = this.weather ? this.weather.amount : 0;
       this.birds.update(delta, focus, onFoot, this.daylight, rain, this.fire, this.aircraft);
+      if (this.fishLife) this.fishLife.update(delta, focus);
     }
     if (this.solar && this.player) this.solar.update(this.player);
     if (this.turbine && this.player) {

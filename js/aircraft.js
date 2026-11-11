@@ -83,8 +83,9 @@ export class Aircraft {
     return 1 + this.cargo / 240;
   }
 
+  // Flat pack. Camp loads draw charge; flight does not sag with the meter.
   powerFactor() {
-    return Math.max(0.32, this.charge / 100);
+    return 1;
   }
 
   // Keeps the lower tire planted when the fuselage rotates on the ground.

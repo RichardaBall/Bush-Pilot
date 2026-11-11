@@ -19,6 +19,9 @@ Serve the folder (any static server), open `index.html`, click the canvas once s
 
 - [ ] Walking into the sea slows you, then you swim. The camera stays above the surface.
 - [ ] Wet steps splash. Dry sand leaves prints. The plane will not taxi into the water.
+- [ ] The south shoreline shows the same shallow color and moving foam as the home beach. The channel between the islands stays deep.
+- [ ] The south beach has scattered stones you can walk into. The home beach stones are unchanged.
+- [ ] The south forest has banana trees, mushrooms, pineapple plants, the second flower, and loose bananas, coconuts, and pineapples. The home forest and the pond are unchanged.
 
 **Smurf** (`smurf.js`, `loaders.js`)
 
@@ -56,6 +59,13 @@ Serve the folder (any static server), open `index.html`, click the canvas once s
 - [ ] Walk up to one: it climbs and settles farther along the shore. A low pass in the plane does the same.
 - [ ] Light the campfire. Two gulls drift into a ring around it, still above head height. Put the fire out and they return to the beach.
 - [ ] A short chirp plays when you are near them by day. It is quieter in rain, and it is gone at night while they sit low.
+- [ ] On the south island shore by day, gulls circle the same way. The Smurf is not there.
+- [ ] A campfire on the south island draws those gulls in. The gulls on the home beach stay put.
+
+**Fish** (`fish.js`, `main.js`)
+
+- [ ] In the channel and off the south shore, rings spread on the water every few seconds. The home beach, forest, and home lake stay clear of them.
+- [ ] Now and then a fish jumps: a tapered body, forked tail, and fin, then a ring where it lands. A quiet splash plays if you are close.
 
 **Sound** (`audio.js`, `groundfx.js`)
 

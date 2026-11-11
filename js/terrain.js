@@ -1604,8 +1604,12 @@ export class Terrain {
         .replace('#include <common>', `#include <common>\nvarying vec3 vOceanWorld;\nuniform float uTime;\nuniform float uDay;\n${COAST_GLSL}`)
         .replace('#include <color_fragment>', `
           vec2 xz = vOceanWorld.xz;
-          if (farShoreAt(xz) > 0.35) discard;
-          float shore = shoreDistAt(xz);
+          float dist = length(xz);
+          float ang = dist > 0.001 ? atan(xz.y, xz.x) : 0.0;
+          float homeShore = smoothMax(coastAt(ang) - dist, spitInside(xz), 12.0);
+          float farShore = farShoreAt(xz);
+          float shore = max(homeShore, farShore);
+          if (shore > 0.35) discard;
           float depth = clamp(-shore / 70.0, 0.0, 1.0);
           vec3 col = mix(vec3(0.16, 0.62, 0.64), vec3(0.07, 0.40, 0.52), smoothstep(0.0, 0.4, depth));
           col = mix(col, vec3(0.02, 0.20, 0.34), smoothstep(0.3, 1.0, depth));
@@ -1851,6 +1855,13 @@ export class Terrain {
           const c = this.clearings[(rng() * this.clearings.length) | 0];
           x = c.x + (rng() - 0.5) * c.rx * 2.3;
           z = c.z + (rng() - 0.5) * c.rz * 2.3;
+        } else if (options.sandBand) {
+          const ang = rng() * Math.PI * 2;
+          const coast = this.farCoastRadius(ang);
+          const inland = 10 + rng() * 16;
+          const dist = Math.max(12, coast - inland);
+          x = this.farX + Math.cos(ang) * dist;
+          z = this.farZ + Math.sin(ang) * dist;
         } else {
           const sample = this.sampleDisc(rng, radius);
           x = sample[0] + (options.ox || 0);
@@ -2001,18 +2012,38 @@ export class Terrain {
     plant('JungleTree01', 360, farR, jungle, farTree);
     plant('JungleTree02', 280, farR, jungle, farTree);
     plant('BananaTree01', 70, farR, (s, _x, _z, r) => (forestTree(s) ? 1.7 + r() * 0.7 : 0), farTree);
+    plant('BananaTree02', 70, farR, (s, _x, _z, r) => (forestTree(s) ? 1.5 + r() * 0.6 : 0), farTree);
     plant('Palm01', 46, farR, palm, farTree);
     plant('Palm02', 36, farR, palm, farTree);
     plant('Palm03', 22, farR, palm, farTree);
+    plant('Mushroom 1', 36, farR, (s, _x, _z, r) => {
+      if (s.kind !== 'forest' || s.slope > 0.35 || s.height < 1) return 0;
+      return 0.4 + r() * 0.45;
+    }, farPlace);
+    plant('Mushroom 2', 24, farR, (s, _x, _z, r) => {
+      if (s.kind !== 'forest' || s.slope > 0.35 || s.height < 1) return 0;
+      return 0.35 + r() * 0.4;
+    }, farPlace);
     plant('TropicalPlant01', 140, farR, understory, farPlace);
     plant('TropicalPlant02', 110, farR, understory, farPlace);
-    plant('TropicalFlower01', 70, farR, (s, _x, _z, r) => (s.kind === 'forest' ? 0.85 + r() * 0.4 : 0), farPlace);
-    for (const name of ['Icosphere', 'Icosphere.001', 'Icosphere.002', 'Icosphere.003']) {
-      plant(name, 2, farR, (s, x, z, r) => stoneHere(s, x, z, r), {
-        tries: 24,
+    plant('TropicalPlant03', 140, farR, understory, farPlace);
+    plant('PineapplePlant', 90, farR, understory, farPlace);
+    const farFlower = (s, _x, _z, r) => (s.kind === 'forest' ? 0.85 + r() * 0.4 : 0);
+    plant('TropicalFlower01', 70, farR, farFlower, farPlace);
+    plant('TropicalFlower01.001', 100, farR, farFlower, farPlace);
+    plant('Banana', 40, farR, (s, _x, _z, r) => (s.kind === 'forest' ? 0.8 + r() * 0.4 : 0), farPlace);
+    plant('Coconut', 36, farR, (s, _x, _z, r) => (s.kind === 'forest' ? 0.8 + r() * 0.35 : 0), farPlace);
+    plant('CoconutHalf', 24, farR, (s, _x, _z, r) => (s.kind === 'forest' ? 0.8 + r() * 0.35 : 0), farPlace);
+    plant('Pineapple', 30, farR, (s, _x, _z, r) => (s.kind === 'forest' ? 0.85 + r() * 0.35 : 0), farPlace);
+    for (const name of [
+      'Icosphere', 'Icosphere.001', 'Icosphere.002', 'Icosphere.003', 'Icosphere.004',
+      'Icosphere.005', 'Icosphere.006', 'Icosphere.007', 'Icosphere.008', 'Icosphere.009',
+      'Icosphere.010', 'Icosphere.011', 'Icosphere.012', 'Icosphere.013', 'Icosphere.014'
+    ]) {
+      plant(name, 3, farR, (s, x, z, r) => stoneHere(s, x, z, r), {
+        tries: 48,
+        sandBand: true,
         solid: true,
-        ox: this.farX,
-        oz: this.farZ,
         color: stoneColor,
         sink: (scale) => scale * 0.18,
         orient: (obj, _s, _x, _z, r) => {

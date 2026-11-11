@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 
 const COUNT = 8;
+const FAR_COUNT = 6;
 const CAMP_COUNT = 2;
 const FLEE_FOOT = 12;
 const FLEE_PLANE = 30;
@@ -72,7 +73,42 @@ export class Birds {
         state: 'loiter',
         flee: 0,
         fleeAlt: 4,
-        camp: i < CAMP_COUNT
+        camp: i < CAMP_COUNT,
+        island: 'home'
+      };
+      this.birds.push(bird);
+      scene.add(parts.group);
+    }
+
+    for (let i = 0; i < FAR_COUNT; i++) {
+      const ang = -Math.PI / 2 + (i - (FAR_COUNT - 1) / 2) * 0.22;
+      const spot = this.sampleFarShore(ang, i + 3) || this.farFallback(ang);
+      const parts = makeBird(bodyMat, wingMat, beakMat, wingGeo);
+      const bird = {
+        i,
+        mesh: parts.group,
+        wingL: parts.wingL,
+        wingR: parts.wingR,
+        homeX: spot.x,
+        homeZ: spot.z,
+        cx: spot.x,
+        cz: spot.z,
+        x: spot.x,
+        z: spot.z,
+        yaw: 0,
+        phase: Math.random() * Math.PI * 2,
+        orbit: Math.random() * Math.PI * 2,
+        spin: i % 2 === 0 ? 1 : -1,
+        rad: 10 + (i % 3) * 2.4,
+        alt: 3.4 + (i % 4) * 0.45,
+        vx: 0,
+        vz: 0,
+        yawRate: 0,
+        state: 'loiter',
+        flee: 0,
+        fleeAlt: 4,
+        camp: true,
+        island: 'far'
       };
       this.birds.push(bird);
       scene.add(parts.group);
@@ -99,14 +135,56 @@ export class Birds {
     return null;
   }
 
+  sampleFarShore(ang, salt) {
+    const ox = this.terrain.farX;
+    const oz = this.terrain.farZ;
+    for (let k = 0; k < 10; k++) {
+      const a = ang + (k - 4) * 0.045;
+      const canopy = this.terrain.farCanopyRadius(a);
+      const coast = this.terrain.farCoastRadius(a);
+      const along = 0.28 + (salt % 4) * 0.1;
+      const r = canopy + (coast - canopy) * along;
+      const x = ox + Math.cos(a) * r;
+      const z = oz + Math.sin(a) * r;
+      const surface = this.terrain.getSurfaceAt(x, z);
+      const water = this.terrain.waterAt(x, z);
+      if (water.depth > 0.15) continue;
+      const edge = surface.kind === 'forest' && surface.canopyDist < 10;
+      if (surface.kind !== 'sand' && !edge) continue;
+      if (this.terrain.hitsSolid(x, z, 0.8)) continue;
+      return { x, z };
+    }
+    return null;
+  }
+
+  farFallback(ang) {
+    const coast = this.terrain.farCoastRadius(ang);
+    const canopy = this.terrain.farCanopyRadius(ang);
+    const r = canopy + (coast - canopy) * 0.35;
+    return {
+      x: this.terrain.farX + Math.cos(ang) * r,
+      z: this.terrain.farZ + Math.sin(ang) * r
+    };
+  }
+
   shiftHome(bird, tx, tz) {
-    const ang = Math.atan2(bird.homeZ, bird.homeX);
+    const far = bird.island === 'far';
+    const ox = far ? this.terrain.farX : 0;
+    const oz = far ? this.terrain.farZ : 0;
+    const ang = Math.atan2(bird.homeZ - oz, bird.homeX - ox);
     const away = Math.atan2(bird.homeZ - tz, bird.homeX - tx);
     const step = Math.sin(away - ang) >= 0 ? 0.14 : -0.14;
-    const spot = this.sampleShore(ang + step, bird.i + 1);
+    const spot = far
+      ? this.sampleFarShore(ang + step, bird.i + 1)
+      : this.sampleShore(ang + step, bird.i + 1);
     if (!spot) return;
     bird.homeX = spot.x;
     bird.homeZ = spot.z;
+  }
+
+  fireOnFar(pos) {
+    const reach = this.terrain.farReach || 0;
+    return Math.hypot(pos.x - this.terrain.farX, pos.z - this.terrain.farZ) < reach;
   }
 
   planeLow(aircraft) {
@@ -167,6 +245,7 @@ export class Birds {
     const night = daylight < NIGHT;
     const wet = Math.min(1, Math.max(0, rain || 0));
     const campAt = night ? null : this.fireSpot(fire);
+    const onFarFire = campAt ? this.fireOnFar(campAt) : false;
     const low = this.planeLow(aircraft);
     let nearestD = HEAR;
     let heard = false;
@@ -198,7 +277,7 @@ export class Birds {
         ? 'flee'
         : night
           ? 'roost'
-          : bird.camp && campAt
+          : bird.camp && campAt && (bird.island === 'far' ? onFarFire : !onFarFire)
             ? 'camp'
             : 'loiter';
       const drop = 1 - wet * 0.35;
