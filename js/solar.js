@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { Tent } from './tent.js';
+import { batteryBeside, batteryCovers } from './battery.js';
 
 const PLANE_REACH = 12;
 const PLUG_REACH = 3.5;
@@ -32,6 +33,9 @@ export class SolarPanel {
       aim: 'the solar panel'
     });
     this.lead = 'none';
+    this.target = null;
+    this.battery = null;
+    this.batteries = null;
     this._from = new THREE.Vector3();
     this._to = new THREE.Vector3();
     this._mid = new THREE.Vector3();
@@ -90,24 +94,37 @@ export class SolarPanel {
     this.placeable.nudgeReach(pixels);
   }
 
+  parked() {
+    return !this.aircraft.airborne && this.aircraft.speed < 0.8;
+  }
+
+  nearHub(x, z, origin) {
+    const dx = x - origin.x;
+    const dz = z - origin.z;
+    return dx * dx + dz * dz <= PLANE_REACH * PLANE_REACH;
+  }
+
+  planeInReachAt(x, z) {
+    return this.parked() && this.nearHub(x, z, this.aircraft.position);
+  }
+
+  batteryInReachAt(x, z) {
+    return batteryCovers(this.batteries, x, z);
+  }
+
   aim(player) {
     this.placeable.aim(player);
     if (!this.placeable.valid) return;
-    const parked = !this.aircraft.airborne && this.aircraft.speed < 0.8;
-    if (!parked) {
-      this.placeable.valid = false;
-      this.placeable.reason = 'The aircraft has to be parked.';
-      this.placeable.tint(false);
-      return;
-    }
     const ghost = this.placeable.ghost.position;
+    if (this.planeInReachAt(ghost.x, ghost.z) || this.batteryInReachAt(ghost.x, ghost.z)) return;
     const dx = ghost.x - this.aircraft.position.x;
     const dz = ghost.z - this.aircraft.position.z;
-    if (dx * dx + dz * dz > PLANE_REACH * PLANE_REACH) {
-      this.placeable.valid = false;
-      this.placeable.reason = 'Too far from the aircraft.';
-      this.placeable.tint(false);
-    }
+    const nearPlane = dx * dx + dz * dz <= PLANE_REACH * PLANE_REACH;
+    this.placeable.valid = false;
+    this.placeable.reason = nearPlane && !this.parked()
+      ? 'The aircraft has to be parked.'
+      : 'Too far from the battery or the aircraft.';
+    this.placeable.tint(false);
   }
 
   confirm() {
@@ -115,40 +132,60 @@ export class SolarPanel {
   }
 
   startCable() {
-    if (this.placeable.state !== 'placed' || this.lead !== 'none') return;
+    if (this.placeable.state !== 'placed' || this.lead !== 'none') return false;
+    this.target = null;
+    this.battery = null;
     this.lead = 'cabling';
+    return true;
   }
 
   cancelCable() {
     if (this.lead !== 'cabling') return;
     this.lead = 'none';
+    this.target = null;
     this.cable.visible = false;
   }
 
   tryPlug(player) {
     if (this.lead !== 'cabling') return false;
-    if (player.position.distanceTo(this.aircraft.position) > PLUG_REACH) return false;
+    if (this.target === 'battery') {
+      const cell = batteryBeside(this.batteries, player.position, PLUG_REACH);
+      if (!cell) return false;
+      this.battery = cell;
+    } else if (player.position.distanceTo(this.aircraft.position) > PLUG_REACH) {
+      return false;
+    }
     this.lead = 'connected';
     return true;
   }
 
   unplug() {
-    if (this.lead !== 'connected') return;
+    if (this.lead !== 'connected' && this.lead !== 'cabling') return;
     this.lead = 'none';
+    this.target = null;
+    this.battery = null;
     this.cable.visible = false;
   }
 
   pack() {
     this.lead = 'none';
+    this.target = null;
     this.cable.visible = false;
     this.placeable.pack();
   }
 
   inPlugRange(player) {
+    if (this.target === 'battery') {
+      if (this.lead === 'connected') {
+        return !!(this.battery && this.battery.placed && player.position.distanceTo(this.battery.placeable.placed.position) <= PLUG_REACH);
+      }
+      return !!batteryBeside(this.batteries, player.position, PLUG_REACH);
+    }
     return player.position.distanceTo(this.aircraft.position) <= PLUG_REACH;
   }
 
   socket() {
+    if (this.target === 'battery' && this.battery && this.battery.placed) return this.battery.socket(this._socket);
     const side = this.aircraft.heading + Math.PI / 2;
     this._socket.set(
       this.aircraft.position.x + Math.sin(side) * 0.5,
@@ -159,6 +196,8 @@ export class SolarPanel {
   }
 
   update(player) {
+    if (this.lead !== 'none' && this.target === 'plane' && !this.parked()) this.unplug();
+    if (this.lead === 'connected' && this.target === 'battery' && !(this.battery && this.battery.placed)) this.unplug();
     if (this.lead === 'none' || !this.placeable.placed) {
       this.cable.visible = false;
       return;

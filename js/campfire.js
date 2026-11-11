@@ -59,6 +59,19 @@ export function createCampfire() {
   }
   root.add(flames);
 
+  const smoke = new THREE.Group();
+  smoke.name = 'smoke';
+  smoke.visible = false;
+  for (let i = 0; i < 6; i++) {
+    const puff = new THREE.Mesh(
+      new THREE.SphereGeometry(0.09, 6, 5),
+      new THREE.MeshBasicMaterial({ color: 0xb7b2ac, transparent: true, opacity: 0.28, depthWrite: false })
+    );
+    puff.userData.seed = i / 6;
+    smoke.add(puff);
+  }
+  root.add(smoke);
+
   const light = new THREE.PointLight(0xff7a2a, 0, 8, 2);
   light.name = 'fireLight';
   light.position.y = 0.4;
@@ -122,6 +135,8 @@ export class Campfire {
     const flames = mesh.getObjectByName('flames');
     const light = mesh.getObjectByName('fireLight');
     if (flames) flames.visible = on;
+    const smoke = mesh.getObjectByName('smoke');
+    if (smoke) smoke.visible = on;
     if (light) light.intensity = on ? 12 : 0;
   }
 
@@ -143,5 +158,16 @@ export class Campfire {
     }
     const light = this.placeable.placed.getObjectByName('fireLight');
     if (light) light.intensity = 12 + Math.sin(this.time * 11) * 2;
+    const smoke = this.placeable.placed.getObjectByName('smoke');
+    if (smoke) {
+      for (let i = 0; i < smoke.children.length; i++) {
+        const puff = smoke.children[i];
+        const t = (this.time * 0.18 + puff.userData.seed) % 1;
+        const sway = Math.sin(this.time * 0.7 + i);
+        puff.position.set(sway * 0.06, 0.42 + t * 1.15, Math.cos(this.time * 0.6 + i) * 0.06);
+        puff.scale.setScalar(0.55 + t * 1.5);
+        puff.material.opacity = (1 - t) * 0.38;
+      }
+    }
   }
 }

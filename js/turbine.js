@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { Tent } from './tent.js';
+import { WIND_CALM } from './weather.js';
+import { batteryBeside, batteryCovers } from './battery.js';
 
 const REACH = 12;
 const PLUG_REACH = 3.5;
@@ -48,6 +50,8 @@ export class WindTurbine {
     });
     this.lead = 'none';
     this.target = null;
+    this.battery = null;
+    this.batteries = null;
     this._blades = null;
     this._from = new THREE.Vector3();
     this._to = new THREE.Vector3();
@@ -80,7 +84,7 @@ export class WindTurbine {
   }
 
   get blocksPower() {
-    return this.placeable.state !== 'packed';
+    return false;
   }
 
   parked() {
@@ -111,6 +115,10 @@ export class WindTurbine {
     return this.within(x, z, spot.x, spot.z);
   }
 
+  batteryInReachAt(x, z) {
+    return batteryCovers(this.batteries, x, z);
+  }
+
   planeInReach() {
     const spot = this.spot();
     return !!spot && this.planeInReachAt(spot.x, spot.z);
@@ -124,7 +132,19 @@ export class WindTurbine {
   chargesPlane() {
     if (this.lead !== 'connected' || !this.parked()) return false;
     if (this.target === 'plane') return true;
-    return this.target === 'tent' && !!(this.tentPower && this.tentPower.connected);
+    return this.target === 'tent' && !!(this.tentPower && this.tentPower.connected && this.tentPower.target === 'plane');
+  }
+
+  chargesBattery() {
+    if (this.lead !== 'connected') return false;
+    if (this.target === 'battery') return !!(this.battery && this.battery.placed);
+    return this.target === 'tent' && !!(this.tentPower && this.tentPower.connected && this.tentPower.target === 'battery' && this.tentPower.battery && this.tentPower.battery.placed);
+  }
+
+  fedCell() {
+    if (this.target === 'battery') return this.battery;
+    if (this.target === 'tent' && this.tentPower && this.tentPower.target === 'battery') return this.tentPower.battery;
+    return null;
   }
 
   startPlacing(player) {
@@ -147,14 +167,14 @@ export class WindTurbine {
     this.placeable.aim(player);
     if (!this.placeable.valid) return;
     const ghost = this.placeable.ghost.position;
-    if (this.planeInReachAt(ghost.x, ghost.z) || this.tentInReachAt(ghost.x, ghost.z)) return;
+    if (this.planeInReachAt(ghost.x, ghost.z) || this.tentInReachAt(ghost.x, ghost.z) || this.batteryInReachAt(ghost.x, ghost.z)) return;
     this.placeable.valid = false;
     const dx = ghost.x - this.aircraft.position.x;
     const dz = ghost.z - this.aircraft.position.z;
     const nearPlane = dx * dx + dz * dz <= REACH * REACH;
     this.placeable.reason = nearPlane && !this.parked()
       ? 'The aircraft has to be parked.'
-      : 'Too far from the tent or the aircraft.';
+      : 'Too far from the tent, the battery, or the aircraft.';
     this.placeable.tint(false);
   }
 
@@ -164,12 +184,10 @@ export class WindTurbine {
     return true;
   }
 
-  startCable(target) {
+  startCable() {
     if (this.placeable.state !== 'placed' || this.lead !== 'none') return false;
-    if (target === 'plane' && !this.planeInReach()) return false;
-    if (target === 'tent' && !this.tentInReach()) return false;
-    if (target !== 'plane' && target !== 'tent') return false;
-    this.target = target;
+    this.target = null;
+    this.battery = null;
     this.lead = 'cabling';
     return true;
   }
@@ -181,7 +199,13 @@ export class WindTurbine {
 
   tryPlug(player) {
     if (this.lead !== 'cabling') return false;
-    if (!this.inPlugRange(player)) return false;
+    if (this.target === 'battery') {
+      const cell = batteryBeside(this.batteries, player.position, PLUG_REACH);
+      if (!cell) return false;
+      this.battery = cell;
+    } else if (!this.inPlugRange(player)) {
+      return false;
+    }
     this.lead = 'connected';
     return true;
   }
@@ -198,6 +222,7 @@ export class WindTurbine {
   drop() {
     this.lead = 'none';
     this.target = null;
+    this.battery = null;
     this.cable.visible = false;
     if (this.tentPower) this.tentPower.fed = false;
   }
@@ -212,6 +237,12 @@ export class WindTurbine {
     if (this.target === 'tent') {
       if (!this.tent || !this.tent.placed) return false;
       return player.position.distanceTo(this.tent.placed.position) <= PLUG_REACH;
+    }
+    if (this.target === 'battery') {
+      if (this.lead === 'connected') {
+        return !!(this.battery && this.battery.placed && player.position.distanceTo(this.battery.placeable.placed.position) <= PLUG_REACH);
+      }
+      return !!batteryBeside(this.batteries, player.position, PLUG_REACH);
     }
     return player.position.distanceTo(this.aircraft.position) <= PLUG_REACH;
   }
@@ -241,14 +272,16 @@ export class WindTurbine {
     return this._socket;
   }
 
-  update(delta, player, rate) {
-    if (this._blades) this._blades.rotation.z += delta * (4 + rate * 80);
+  update(delta, player, rate, wind) {
+    const blow = wind >= WIND_CALM ? wind : 0;
+    if (this._blades && blow > 0) this._blades.rotation.z += delta * blow * (6 + rate * 70);
 
     if (this.lead !== 'none' && this.target === 'plane' && !this.parked()) this.drop();
     if (this.lead !== 'none' && this.target === 'tent' && (!this.tent || this.tent.state !== 'placed')) this.drop();
+    if (this.lead === 'connected' && this.target === 'battery' && !(this.battery && this.battery.placed)) this.drop();
 
     if (this.tentPower) {
-      this.tentPower.fed = this.lead === 'connected' && this.target === 'tent' && !!this.placeable.placed;
+      this.tentPower.fed = blow > 0 && this.lead === 'connected' && this.target === 'tent' && !!this.placeable.placed;
     }
 
     if (this.lead === 'none' || !this.placeable.placed) {
@@ -258,6 +291,7 @@ export class WindTurbine {
     const mesh = this.placeable.placed;
     if (this.lead === 'connected') {
       if (this.target === 'tent') this.tentSocket();
+      else if (this.target === 'battery' && this.battery) this.battery.socket(this._socket);
       else this.planeSocket();
     } else {
       const yaw = player.mesh.rotation.y;

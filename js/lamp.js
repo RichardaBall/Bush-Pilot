@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { batteryBeside } from './battery.js';
 
 const PLUG_REACH = 3.5;
 const DRAIN = 0.28;
@@ -23,6 +24,7 @@ export class Lamp {
     this.scene = scene;
     this.player = player;
     this.aircraft = aircraft;
+    this.batteries = null;
     this.charge = 100;
     this.lit = false;
     this.charging = false;
@@ -95,8 +97,17 @@ export class Lamp {
     return this.player.position.distanceTo(this.aircraft.position) <= PLUG_REACH;
   }
 
-  canCharge() {
+  atBattery() {
+    const cell = batteryBeside(this.batteries, this.player.position, PLUG_REACH);
+    return !!(cell && cell.charge > 0);
+  }
+
+  canChargePlane() {
     return this.charge < 99.5 && this.parked() && this.inPlugRange() && this.aircraft.charge > 0;
+  }
+
+  canChargeBattery() {
+    return this.charge < 99.5 && this.atBattery();
   }
 
   toggle() {
@@ -114,8 +125,22 @@ export class Lamp {
     this.lit = false;
   }
 
-  startCharge() {
-    if (!this.canCharge()) return false;
+  startCharge(source) {
+    if (source === 'plane' && !this.canChargePlane()) return false;
+    if (source === 'battery') {
+      const cell = batteryBeside(this.batteries, this.player.position, PLUG_REACH);
+      if (!cell || cell.charge <= 0 || this.charge >= 99.5) return false;
+      this.battery = cell;
+    }
+    if (source === 'seek') {
+      if (this.charge >= 99.5) return false;
+      this.source = 'seek';
+      this.charging = true;
+      this.lit = false;
+      return true;
+    }
+    if (source !== 'plane' && source !== 'battery') return false;
+    this.source = source;
     this.charging = true;
     this.lit = false;
     return true;
@@ -146,19 +171,32 @@ export class Lamp {
     if (!onFoot) {
       this.douse();
       this.stopCharge();
+    } else if (this.charging && this.source === 'seek') {
+      const hand = this.handPoint();
+      const yaw = this.player.mesh.rotation.y;
+      this._socket.set(hand.x + Math.sin(yaw) * 0.85, hand.y - 0.15, hand.z + Math.cos(yaw) * 0.85);
+      this.layCable(hand, this._socket);
     } else if (this.charging) {
-      const parked = this.parked() && this.inPlugRange();
-      if (!parked || this.aircraft.charge <= 0 || this.charge >= 100) {
+      const fromPlane = this.source === 'plane' && this.parked() && this.inPlugRange() && this.aircraft.charge > 0;
+      const fromBattery = this.source === 'battery' && this.atBattery();
+      if ((!fromPlane && !fromBattery) || this.charge >= 100) {
         this.stopCharge();
       } else {
         const gain = Math.min(LAMP_GAIN * delta, 100 - this.charge);
-        const cost = gain * (PLANE_COST / LAMP_GAIN);
-        const used = Math.min(cost, this.aircraft.charge);
+        const rate = PLANE_COST / LAMP_GAIN;
+        const cost = gain * (fromBattery ? rate * 3 : rate);
+        let used = cost;
+        if (fromPlane) {
+          used = Math.min(cost, this.aircraft.charge);
+          this.aircraft.charge = Math.max(0, this.aircraft.charge - used);
+        } else {
+          used = this.battery.draw(cost);
+        }
         const got = cost > 0 ? gain * (used / cost) : 0;
         this.charge = Math.min(100, this.charge + got);
-        this.aircraft.charge = Math.max(0, this.aircraft.charge - used);
-        if (this.charge >= 99.5 || this.aircraft.charge <= 0) this.stopCharge();
-        else this.layCable(this.socket(), this.handPoint());
+        const empty = fromPlane ? this.aircraft.charge <= 0 : this.battery.charge <= 0;
+        if (this.charge >= 99.5 || empty) this.stopCharge();
+        else this.layCable(fromPlane ? this.socket() : this.battery.socket(this._socket), this.handPoint());
       }
     } else {
       this.cable.visible = false;

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { batteryBeside, batteryCovers } from './battery.js';
 
 const PLANE_REACH = 12;
 const PLUG_REACH = 3.5;
@@ -10,8 +11,12 @@ export class TentPower {
     this.tent = tent;
     this.aircraft = aircraft;
     this.lead = 'none';
+    this.target = null;
+    this.battery = null;
+    this.batteries = null;
     this.fed = false;
     this.reason = '';
+    this.supply = '';
     this._from = new THREE.Vector3();
     this._to = new THREE.Vector3();
     this._mid = new THREE.Vector3();
@@ -62,6 +67,12 @@ export class TentPower {
   }
 
   inPlugRange(player) {
+    if (this.target === 'battery') {
+      if (this.lead === 'connected') {
+        return !!(this.battery && this.battery.placed && player.position.distanceTo(this.battery.placeable.placed.position) <= PLUG_REACH);
+      }
+      return !!batteryBeside(this.batteries, player.position, PLUG_REACH);
+    }
     return player.position.distanceTo(this.aircraft.position) <= PLUG_REACH;
   }
 
@@ -73,30 +84,35 @@ export class TentPower {
     return dx * dx + dz * dz <= PLANE_REACH * PLANE_REACH;
   }
 
+  batteryInReach() {
+    if (!this.placed()) return false;
+    const spot = this.tent.placed.position;
+    return batteryCovers(this.batteries, spot.x, spot.z);
+  }
+
   startCable() {
     if (!this.placed() || this.lead !== 'none') return false;
-    if (!this.parked()) {
-      this.reason = 'The aircraft has to be parked.';
-      return false;
-    }
-    if (!this.withinReach()) {
-      this.reason = 'Too far from the aircraft.';
-      return false;
-    }
     this.reason = '';
+    this.target = null;
+    this.battery = null;
     this.lead = 'cabling';
     return true;
   }
 
   cancelCable() {
     if (this.lead !== 'cabling') return;
-    this.lead = 'none';
-    this.cable.visible = false;
+    this.drop();
   }
 
   tryPlug(player) {
     if (this.lead !== 'cabling') return false;
-    if (!this.inPlugRange(player)) return false;
+    if (this.target === 'battery') {
+      const cell = batteryBeside(this.batteries, player.position, PLUG_REACH);
+      if (!cell) return false;
+      this.battery = cell;
+    } else if (!this.inPlugRange(player)) {
+      return false;
+    }
     this.lead = 'connected';
     this.reason = '';
     return true;
@@ -104,13 +120,14 @@ export class TentPower {
 
   unplug() {
     if (this.lead !== 'connected') return;
-    this.lead = 'none';
-    this.cable.visible = false;
-    this.dark();
+    this.drop();
   }
 
   drop() {
     this.lead = 'none';
+    this.target = null;
+    this.battery = null;
+    this.supply = '';
     this.cable.visible = false;
     this.dark();
   }
@@ -122,6 +139,7 @@ export class TentPower {
   }
 
   socket() {
+    if (this.target === 'battery' && this.battery && this.battery.placed) return this.battery.socket(this._socket);
     const side = this.aircraft.heading + Math.PI / 2;
     this._socket.set(
       this.aircraft.position.x + Math.sin(side) * 0.5,
@@ -131,14 +149,15 @@ export class TentPower {
     return this._socket;
   }
 
-  update(delta, player, daylight) {
+  update(delta, player, daylight, battery) {
     if (!this.placed()) {
       this.drop();
       this.reason = '';
       return;
     }
     if (this.reason && (this.lead !== 'none' || this.withinReach())) this.reason = '';
-    if (this.lead !== 'none' && !this.parked()) this.drop();
+    if (this.lead !== 'none' && this.target === 'plane' && !this.parked()) this.drop();
+    if (this.lead === 'connected' && this.target === 'battery' && !(this.battery && this.battery.placed)) this.drop();
     if (this.lead === 'none') {
       this.cable.visible = false;
     } else {
@@ -155,9 +174,11 @@ export class TentPower {
     }
 
     const night = daylight < 0.2;
-    const fromPlane = this.lead === 'connected' && this.parked() && night && this.aircraft.charge > 0;
+    const fromPlane = this.target === 'plane' && this.lead === 'connected' && this.parked() && night && this.aircraft.charge > 0;
     const fromWind = this.fed && night;
-    if (!fromPlane && !fromWind) {
+    const fromBattery = this.target === 'battery' && this.lead === 'connected' && !fromWind && night && this.battery && this.battery.charge > 0;
+    if (!fromPlane && !fromWind && !fromBattery) {
+      this.supply = '';
       this.dark();
       return;
     }
@@ -171,6 +192,8 @@ export class TentPower {
     this.bar.material.emissiveIntensity = 2.2;
     this.light.intensity = 6;
     if (fromPlane && !this.fed) this.aircraft.charge = Math.max(0, this.aircraft.charge - DRAIN * delta);
+    if (fromBattery) this.battery.draw(DRAIN * 3 * delta);
+    this.supply = fromBattery ? 'battery' : (fromPlane ? 'plane' : 'wind');
   }
 
   layFromTent(to) {

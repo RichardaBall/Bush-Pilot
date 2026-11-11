@@ -1,22 +1,10 @@
 export class FieldKit {
-  constructor(terrain, aircraft) {
+  constructor(terrain) {
     this.terrain = terrain;
-    this.aircraft = aircraft;
     this.hunger = 100;
     this.thirst = 100;
     this.stamina = 100;
-    this.cans = 0;
     this.daylight = 1;
-  }
-
-  waterNearby(position) {
-    const s = this.terrain.getSurfaceAt(position.x, position.z);
-    if (s.kind === 'ocean' || s.kind === 'lake' || s.kind === 'river') return true;
-    if (s.kind === 'sand' && s.shoreDist < 18) return true;
-    if (s.riverDist < 14 && s.height < 12) return true;
-    const lake = this.terrain.lake;
-    if (!lake) return false;
-    return this.terrain.lakeEllipse(position.x, position.z) < 1.3 && s.height < lake.level + 2;
   }
 
   chargeRate(x, z) {
@@ -42,12 +30,16 @@ export class FieldKit {
     return this.windRate(x, z) > 0.045 ? 'Turbine spinning in the open' : 'Turbine in the lee';
   }
 
-  collectWater() {
+  eat() {
+    this.hunger = 100;
+  }
+
+  drink() {
     this.thirst = Math.min(100, this.thirst + 34);
-    if (this.aircraft.cargo <= 96) {
-      this.aircraft.cargo += 16;
-      this.cans += 1;
-    }
+  }
+
+  eatFish() {
+    this.hunger = Math.min(100, this.hunger + 40);
   }
 
   update(delta, onFoot, moving) {

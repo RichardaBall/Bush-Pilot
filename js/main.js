@@ -18,6 +18,13 @@ import { SolarPanel } from './solar.js';
 import { WindTurbine } from './turbine.js';
 import { Lamp } from './lamp.js';
 import { TentPower } from './tentpower.js';
+import { WaterBarrel } from './barrel.js';
+import { Weather } from './weather.js';
+import { FishingRod } from './rod.js';
+import { CarBattery } from './battery.js';
+
+const FISH_ROT = 90;
+const FISH_PICK = 1.5;
 
 class Game {
   constructor() {
@@ -27,6 +34,7 @@ class Game {
     this.uiPrompt = document.getElementById('prompt-overlay');
     this.uiMeters = document.getElementById('meters');
     this.uiBuild = document.getElementById('build-menu');
+    this.uiBag = document.getElementById('inventory');
 
     this.mode = 'ON_FOOT'; // 'ON_FOOT' | 'IN_AIRCRAFT'
     this.aircraftState = 'PARKED'; // 'PARKED' | 'CRUISE' | 'TAKEOFF' | 'LANDING'
@@ -55,6 +63,8 @@ class Game {
     this.wasAirborne = false;
     this.buildOpen = false;
     this.buildIndex = 0;
+    this.wire = null;
+    this.wireNote = '';
     this.boot();
   }
 
@@ -204,6 +214,8 @@ class Game {
     this._nightWarm = new THREE.Color(0x1a2438);
     this._zenith = new THREE.Color();
     this._horizon = new THREE.Color();
+    this._fogColor = new THREE.Color();
+    this._rainTint = new THREE.Color(0x7d8a90);
     this._warm = new THREE.Color();
     const sky = new THREE.Mesh(new THREE.SphereGeometry(8000, 32, 20), material);
     sky.frustumCulled = false;
@@ -256,7 +268,12 @@ class Game {
         if (this.solar && this.solar.cabling) this.solar.cancelCable();
         if (this.turbine && this.turbine.placing) this.turbine.cancel();
         if (this.turbine && this.turbine.cabling) this.turbine.cancelCable();
+        if (this.barrel && this.barrel.placing) this.barrel.cancel();
+        if (this.rod && this.rod.placing) this.rod.cancel();
+        const placingCell = this.placingBattery();
+        if (placingCell) placingCell.cancel();
         if (this.tentPower && this.tentPower.cabling) this.tentPower.cancelCable();
+        if (this.wire) this.clearWire();
         if (this.lamp && this.lamp.charging) this.lamp.stopCharge();
       }
       if (!this.keys[e.code]) {
@@ -307,11 +324,24 @@ class Game {
         this.turbine.rotate(e.deltaY);
         return;
       }
+      if (this.barrel && this.barrel.placing) {
+        this.barrel.rotate(e.deltaY);
+        return;
+      }
+      if (this.rod && this.rod.placing) {
+        this.rod.rotate(e.deltaY);
+        return;
+      }
+      const placingCell = this.placingBattery();
+      if (placingCell) {
+        placingCell.rotate(e.deltaY);
+        return;
+      }
       if (this.buildOpen) {
-        const lines = this.campLines();
-        if (lines.length) {
+        const count = this.bagSize();
+        if (count) {
           const step = e.deltaY > 0 ? 1 : -1;
-          this.buildIndex = (this.buildIndex + step + lines.length) % lines.length;
+          this.buildIndex = (this.buildIndex + step + count) % count;
         }
         return;
       }
@@ -322,13 +352,7 @@ class Game {
       if (document.pointerLockElement !== this.canvas) return;
       if (this.mode === 'ON_FOOT' && this.player) {
         this.player.look(e.movementX);
-        const placingItem = this.tent && this.tent.placing
-          ? this.tent
-          : (this.fire && this.fire.placing
-            ? this.fire
-            : (this.solar && this.solar.placing
-              ? this.solar
-              : (this.turbine && this.turbine.placing ? this.turbine : null)));
+        const placingItem = this.activePlaceable();
         if (placingItem) placingItem.nudgeReach(e.movementY);
         else this.player.lookUp(e.movementY);
       } else if (this.mode === 'IN_AIRCRAFT') {
@@ -380,7 +404,40 @@ class Game {
     this.lamp = new Lamp(this.scene, this.player, this.aircraft);
     this.tentPower = this.tent ? new TentPower(this.scene, this.tent, this.aircraft) : null;
     this.turbine = new WindTurbine(this.scene, this.terrain, this.aircraft, this.tent, this.tentPower);
-    this.field = new FieldKit(this.terrain, this.aircraft);
+    this.field = new FieldKit(this.terrain);
+    this.barrel = new WaterBarrel(this.scene, this.terrain);
+    this.rod = new FishingRod(this.scene, this.terrain);
+    this.heldFish = false;
+    this.fishCarry = new THREE.Mesh(
+      new THREE.SphereGeometry(0.07, 8, 6),
+      new THREE.MeshStandardMaterial({ color: 0xc47a45, roughness: 0.55 })
+    );
+    this.fishCarry.scale.set(1.6, 0.5, 0.7);
+    this.fishCarry.position.set(0.11, 0.04, 0.02);
+    this.fishCarry.rotation.z = 0.6;
+    this.fishCarry.castShadow = true;
+    this.fishCarry.frustumCulled = false;
+    this.fishCarry.visible = false;
+    this.lamp.mesh.add(this.fishCarry);
+    this.fishShape = new THREE.SphereGeometry(0.07, 8, 6);
+    this.groundFish = [];
+    this.batteries = [new CarBattery(this.scene, this.terrain)];
+    this.carried = { tent: 1, fire: 1, solar: 1, turbine: 1, barrel: 1, rod: 1, battery: 1 };
+    if (this.lamp) this.lamp.batteries = this.batteries;
+    if (this.solar) this.solar.batteries = this.batteries;
+    if (this.turbine) this.turbine.batteries = this.batteries;
+    if (this.tentPower) this.tentPower.batteries = this.batteries;
+    this.wireLead = new THREE.Mesh(
+      new THREE.BufferGeometry(),
+      new THREE.MeshStandardMaterial({ color: 0x161616, roughness: 0.85 })
+    );
+    this.wireLead.frustumCulled = false;
+    this.wireLead.visible = false;
+    this.scene.add(this.wireLead);
+    this._wireFrom = new THREE.Vector3();
+    this._wireTo = new THREE.Vector3();
+    this._wireMid = new THREE.Vector3();
+    this.weather = new Weather(this.scene);
     this.groundFx = new GroundFx(this.scene, this.terrain);
     this.groundFx.audio = this.audio;
     this.groundShadow = this.createGroundShadow();
@@ -498,87 +555,46 @@ class Game {
   handleStateTransitions() {
     const dist = this.player.position.distanceTo(this.aircraft.position);
     const panelOut = this.solar && this.solar.blocksPower;
-    const turbineOut = this.turbine && this.turbine.blocksPower;
-    const gearOut = panelOut || turbineOut;
-    const packPrompt = (cockpit) => {
-      const key = cockpit ? ' [G]' : '';
-      if (panelOut && turbineOut) return `Pack the solar panel and the wind turbine${key} before adding power`;
-      if (turbineOut) return `Pack the wind turbine${key} before adding power`;
-      return `Pack the solar panel${key} before adding power`;
-    };
+    const packPrompt = (cockpit) => `Pack the solar panel${cockpit ? ' [G]' : ''} before adding power`;
 
     if (this.mode === 'ON_FOOT') {
-      const placing = (this.tent && this.tent.placing) || (this.fire && this.fire.placing) || (this.solar && this.solar.placing) || (this.turbine && this.turbine.placing);
+      const placing = !!this.activePlaceable();
       const parked = this.aircraftState === 'PARKED';
       const nearPlane = parked && dist < 8;
-      const atWater = this.field.waterNearby(this.player.position);
       if (this.lamp && !placing && !this.buildOpen && !this.lamp.charging && this.keyJustPressed['KeyL']) {
         if (this.lamp.toggle()) this.audio.click();
       }
       if (placing) {
         // Prompt is written after the ghost is aimed.
       } else if (this.solar && this.solar.cabling) {
-        this.uiPrompt.innerText = this.solar.inPlugRange(this.player)
-          ? 'Click to plug the cable into the fuselage'
-          : 'Walk the cable to the fuselage and click to plug it in';
+        const atPlug = this.solar.inPlugRange(this.player);
+        const name = this.solar.target === 'battery' ? 'battery' : 'fuselage';
+        this.uiPrompt.innerText = atPlug
+          ? `Click to plug the cable into the ${name}`
+          : `Walk the cable to the ${name} and click to plug it in`;
       } else if (this.tentPower && this.tentPower.cabling) {
-        this.uiPrompt.innerText = this.tentPower.inPlugRange(this.player)
-          ? 'Click to plug the tent cable into the fuselage'
-          : 'Walk the cable to the fuselage and click to plug it in';
+        const atPlug = this.tentPower.inPlugRange(this.player);
+        const name = this.tentPower.target === 'battery' ? 'battery' : 'fuselage';
+        this.uiPrompt.innerText = atPlug
+          ? `Click to plug the tent cable into the ${name}`
+          : `Walk the tent cable to the ${name} and click to plug it in`;
       } else if (this.turbine && this.turbine.cabling) {
         const atPlug = this.turbine.inPlugRange(this.player);
-        this.uiPrompt.innerText = this.turbine.target === 'tent'
-          ? (atPlug ? 'Click to plug the cable into the tent' : 'Walk the cable to the tent and click to plug it in')
-          : (atPlug ? 'Click to plug the cable into the fuselage' : 'Walk the cable to the fuselage and click to plug it in');
-      } else if (this.lamp && this.lamp.charging) {
+        const name = this.turbine.target === 'tent' ? 'tent' : (this.turbine.target === 'battery' ? 'battery' : 'fuselage');
+        this.uiPrompt.innerText = atPlug
+          ? `Click to plug the cable into the ${name}`
+          : `Walk the cable to the ${name} and click to plug it in`;
+      } else if (this.lamp && this.lamp.charging && this.lamp.source !== 'seek') {
         this.uiPrompt.innerText = 'Charging the lamp. Middle mouse cancels.';
-      } else if (this.fire && this.fire.near(this.player) && this.tent && this.tent.nearPlaced(this.player)) {
-        this.uiPrompt.innerText = 'Middle mouse for the tent and campfire';
-      } else if (this.fire && this.fire.near(this.player)) {
-        this.uiPrompt.innerText = this.fire.lit
-          ? 'Middle mouse to put the fire out or pack it'
-          : 'Middle mouse to light or pack the campfire';
-      } else if (this.tent && this.tent.nearPlaced(this.player)) {
-        const power = this.tentPower;
-        this.uiPrompt.innerText = power && power.reason
-          ? power.reason
-          : (power && power.connected
-            ? 'Middle mouse to unplug the tent or pack it'
-            : 'Middle mouse to run a cable or pack the tent');
-      } else if (this.solar && this.solar.near(this.player)) {
-        const spot = this.solar.spot();
-        this.uiPrompt.innerText = this.solar.connected
-          ? `${this.field.sunLabel(spot.x, spot.z)}. Middle mouse to unplug or pack the panel`
-          : 'Middle mouse to run a cable or pack the solar panel';
-      } else if (this.turbine && this.turbine.near(this.player)) {
-        if (this.turbine.connected) {
-          const spot = this.turbine.spot();
-          const label = this.field.windLabel(spot.x, spot.z);
-          const charging = this.turbine.target === 'tent' && this.tentPower && this.tentPower.connected;
-          this.uiPrompt.innerText = this.turbine.target === 'tent'
-            ? (charging
-              ? `${label}. Plugged into the tent and charging the plane. Middle mouse to unplug or pack the turbine`
-              : `${label}. Plugged into the tent. Middle mouse to unplug or pack the turbine`)
-            : `${label}. Middle mouse to unplug or pack the turbine`;
-        } else {
-          this.uiPrompt.innerText = 'Middle mouse to run a cable or pack the wind turbine';
-        }
-      } else if (dist < 4.5 && parked) {
-        this.uiPrompt.innerText = 'Press [E] to Enter Aircraft';
-        if (this.keyJustPressed['KeyE']) {
-          this.audio.click();
-          this.mode = 'IN_AIRCRAFT';
-          this.planeLookYaw = 0;
-          this.planeLookPitch = 0;
-          this.planeLookIdle = 1;
-          this.player.setActive(false);
-          this.aircraft.airborne = false;
-          this.buildOpen = false;
-          this.uiPrompt.innerText = '';
-        }
-      } else if (atWater) {
-        this.uiPrompt.innerText = 'Press [F] to collect water';
-      } else if (nearPlane && gearOut) {
+      } else if (this.nearestCatch() && !this.heldFish && (!this.closestGear(true) || this.nearestCatch().d < this.closestGear(true).d)) {
+        this.uiPrompt.innerText = 'Press [E] to pick up the fish.';
+      } else if (this.closestGear(true)) {
+        const here = this.closestGear(true);
+        const extra = this.heldFish && here.kind !== 'fire' ? ' Click drops the raw fish.' : '';
+        this.uiPrompt.innerText = this.gearPrompt(here) + extra;
+      } else if (this.heldFish) {
+        this.uiPrompt.innerText = 'Raw fish in hand. Click a lit campfire to cook it. Any other click drops it.';
+      } else if (nearPlane && panelOut) {
         this.uiPrompt.innerText = packPrompt(false);
       } else if (this.lamp && this.lamp.charge <= 0) {
         this.uiPrompt.innerText = 'Lamp is flat. Charge it at the plane.';
@@ -587,18 +603,17 @@ class Game {
       } else {
         this.uiPrompt.innerText = '';
       }
-      if (!placing && atWater && this.keyJustPressed['KeyF']) {
-        this.field.collectWater();
-        this.audio.pour();
-      }
+      if (!placing && this.keyJustPressed['KeyF']) this.packHere();
+      if (!placing && this.keyJustPressed['KeyE']) this.useHere();
+      if (this.wire) this.uiPrompt.innerText = this.wireNote || 'Left click the other end. E cancels.';
     } else if (this.mode === 'IN_AIRCRAFT') {
       if (this.aircraftState === 'PARKED') {
-        this.uiPrompt.innerText = gearOut
+        this.uiPrompt.innerText = panelOut
           ? packPrompt(true)
           : 'Hold [W] to add power and take off. [S] reduces power. [E] Exit';
-        if (this.keyJustPressed['KeyG'] && gearOut) {
-          if (panelOut && this.solar) this.solar.pack();
-          if (turbineOut && this.turbine) this.turbine.pack();
+        if (this.keyJustPressed['KeyG'] && panelOut && this.solar) {
+          this.solar.pack();
+          this.keepGear('solar');
           this.audio.flap();
         }
         if (this.keyJustPressed['KeyE']) {
@@ -616,19 +631,20 @@ class Game {
     }
 
     const charge = Math.round(this.aircraft.charge);
-    const load = Math.round(this.aircraft.cargo);
-    this.uiState.innerText = `State: ${this.mode} | Aircraft: ${this.aircraftState} | Charge ${charge}% | Load ${load} kg | ${this.timeLabel()}`;
+    const rain = this.weather && this.weather.amount > 0.35 ? ' | Rain' : '';
+    this.uiState.innerText = `State: ${this.mode} | Aircraft: ${this.aircraftState} | Charge ${charge}% | ${this.timeLabel()}${rain}`;
     this.uiControls.innerText = this.mode === 'ON_FOOT'
-      ? 'Click to look. Mouse looks. Scroll zooms. W forward, S back, A/D strafe, Shift runs. Middle mouse camp. [E] Aircraft  [F] Water  [L] Lamp'
+      ? 'Click to look. Mouse looks. Scroll zooms. W forward, S back, A/D strafe, Shift runs. Middle mouse places. [E] Use  [F] Unplug or pack  [L] Lamp'
       : 'Click to look. Mouse looks. W adds power, S reduces it, A/D turn. [E] Exit';
-    if (this.uiBuild) {
-      const lines = this.buildOpen ? this.campLines() : [];
-      if (this.buildIndex >= lines.length) this.buildIndex = 0;
-      this.uiBuild.innerText = lines.map((line, i) => (i === this.buildIndex ? `> ${line}` : `  ${line}`)).join('\n');
-    }
+    if (this.uiBuild) this.uiBuild.innerText = '';
+    this.paintBag();
     const kit = this.field;
+    const barrelLine = this.barrel && !this.barrel.packed ? `<br><b>Barrel</b> ${Math.round(this.barrel.water)}` : '';
+    const nearCell = this.batteryNear();
+    const cellLine = nearCell ? `<br><b>Battery</b> ${Math.round(nearCell.charge)}` : '';
+    const fishLine = this.heldFish ? '<br><b>Fish</b> 1' : '';
     this.uiMeters.innerHTML = this.mode === 'ON_FOOT'
-      ? `<b>Hunger</b> ${Math.round(kit.hunger)}<br><b>Thirst</b> ${Math.round(kit.thirst)}<br><b>Stamina</b> ${Math.round(kit.stamina)}<br><b>Water cans</b> ${kit.cans}<br><b>Lamp</b> ${Math.round(this.lamp ? this.lamp.charge : 0)}`
+      ? `<b>Hunger</b> ${Math.round(kit.hunger)}<br><b>Thirst</b> ${Math.round(kit.thirst)}<br><b>Stamina</b> ${Math.round(kit.stamina)}<br><b>Lamp</b> ${Math.round(this.lamp ? this.lamp.charge : 0)}${barrelLine}${cellLine}${fishLine}`
       : '';
   }
 
@@ -644,24 +660,43 @@ class Game {
       this.field.update(delta, onFoot, moving);
       this.player.pace = this.field.pace();
       const spot = this.solar && this.solar.connected ? this.solar.spot() : null;
-      if (!this.aircraft.airborne && spot) {
-        this.aircraft.charge = Math.min(100, this.aircraft.charge + delta * this.field.chargeRate(spot.x, spot.z) * this.daylight);
-      } else if (this.aircraft.airborne || this.aircraft.speed > 6) {
+      const sun = spot ? delta * this.field.chargeRate(spot.x, spot.z) * this.daylight : 0;
+      if (spot && this.solar.target === 'battery' && this.solar.battery && this.solar.battery.placed) {
+        this.solar.battery.charge = Math.min(100, this.solar.battery.charge + sun);
+      } else if (!this.aircraft.airborne && spot && this.solar.target === 'plane') {
+        this.aircraft.charge = Math.min(100, this.aircraft.charge + sun);
+      }
+      if (this.aircraft.airborne || this.aircraft.speed > 6) {
         this.aircraft.charge = Math.max(0, this.aircraft.charge - delta * 0.07);
       }
-      if (this.turbine && this.turbine.chargesPlane()) {
+      const gust = this.weather && !this.weather.calm ? this.weather.wind : 0;
+      if (gust > 0 && this.turbine && this.turbine.chargesPlane()) {
         const windSpot = this.turbine.spot();
         if (windSpot) {
-          this.aircraft.charge = Math.min(100, this.aircraft.charge + delta * this.field.windRate(windSpot.x, windSpot.z));
+          this.aircraft.charge = Math.min(100, this.aircraft.charge + delta * this.field.windRate(windSpot.x, windSpot.z) * gust);
+        }
+      }
+      const windCell = this.turbine && this.turbine.fedCell ? this.turbine.fedCell() : null;
+      if (gust > 0 && windCell && this.turbine.chargesBattery()) {
+        const windSpot = this.turbine.spot();
+        if (windSpot) {
+          windCell.charge = Math.min(100, windCell.charge + delta * this.field.windRate(windSpot.x, windSpot.z) * gust);
         }
       }
     }
+    if (this.barrel) this.barrel.update(delta, this.weather ? this.weather.amount : 0);
     const placingTent = this.tent && this.tent.placing;
     const placingFire = this.fire && this.fire.placing;
     const placingSolar = this.solar && this.solar.placing;
     const placingTurbine = this.turbine && this.turbine.placing;
-    if (this.player) this.player.placing = !!((placingTent || placingFire || placingSolar || placingTurbine) && onFoot);
+    const placingBarrel = this.barrel && this.barrel.placing;
+    const placingRod = this.rod && this.rod.placing;
+    const placingCell = !!this.placingBattery();
+    if (this.player) this.player.placing = !!((placingTent || placingFire || placingSolar || placingTurbine || placingBarrel || placingRod || placingCell) && onFoot);
     this.player.update(delta, this.keys);
+    if (this.rod) this.rod.update(delta);
+    this.ageFish(delta);
+    this.drawLooseWire();
     if (this.smurf) this.smurf.update(delta, this.player, onFoot);
     if (this.groundFx && this.player) {
       const running = this.keys['ShiftLeft'] || this.keys['ShiftRight'];
@@ -701,7 +736,7 @@ class Game {
     }
 
     if (this.mode === 'IN_AIRCRAFT' && this.aircraft) {
-      const gearOut = (this.solar && this.solar.blocksPower) || (this.turbine && this.turbine.blocksPower);
+      const gearOut = !!(this.solar && this.solar.blocksPower);
       const rejected = this.aircraft.updatePoweredFlight(delta, this.keys, gearOut);
       if (rejected && this.landingHint <= 0) this.audio.scrape();
       if (rejected) this.landingHint = 3;
@@ -733,10 +768,14 @@ class Game {
 
     this.handleStateTransitions();
     this.updateCamera(delta);
-    const placing = placingTent ? this.tent : (placingFire ? this.fire : (placingSolar ? this.solar : (placingTurbine ? this.turbine : null)));
+    if (this.weather) {
+      this.weather.update(delta, this.camera);
+      this.audio.rain(this.weather.amount);
+    }
+    const placing = this.activePlaceable();
     if (placing && onFoot) {
       placing.aim(this.player);
-      const spot = placingTent ? this.tent : (placingFire ? this.fire.placeable : (placingSolar ? this.solar.placeable : this.turbine.placeable));
+      const spot = placing.placeable || placing;
       const name = spot.aimLabel;
       this.uiPrompt.innerText = spot.valid
         ? `Aim ${name}. Mouse forward and back sets distance. Scroll rotates. Click to place.`
@@ -747,7 +786,8 @@ class Game {
     if (this.turbine && this.player) {
       const windSpot = this.turbine.spot();
       const rate = windSpot && this.field ? this.field.windRate(windSpot.x, windSpot.z) : 0;
-      this.turbine.update(delta, this.player, rate);
+      const gust = this.weather ? this.weather.wind : 0;
+      this.turbine.update(delta, this.player, rate, gust);
     }
     if (this.lamp && this.player) this.lamp.update(delta, onFoot);
     if (this.tentPower && this.player) this.tentPower.update(delta, this.player, this.daylight);
@@ -784,7 +824,10 @@ class Game {
     sky.uDay.value = daylight;
 
     this.scene.background.copy(this._horizon);
-    this.scene.fog.color.copy(this._horizon);
+    this._fogColor.copy(this._horizon);
+    const rainDim = this.weather ? this.weather.amount : 0;
+    if (rainDim > 0) this._fogColor.lerp(this._rainTint, rainDim * 0.45);
+    this.scene.fog.color.copy(this._fogColor);
 
     this.hemi.intensity = THREE.MathUtils.lerp(0.07, 0.55, daylight);
     this.hemi.color.copy(this._nightHemi).lerp(this._dayHemi, daylight);
@@ -803,7 +846,7 @@ class Game {
       this.lightOffset.set(-this.sunOffset.x, Math.max(40, -this.sunOffset.y), -this.sunOffset.z);
     }
 
-    this.renderer.toneMappingExposure = THREE.MathUtils.lerp(0.55, 1.05, daylight);
+    this.renderer.toneMappingExposure = THREE.MathUtils.lerp(0.55, 1.05, daylight) * (1 - (this.weather ? this.weather.amount : 0) * 0.28);
     if (this.terrain) this.terrain.setDaylight(sunDir, daylight);
   }
 
@@ -829,47 +872,569 @@ class Game {
 
   campLines() {
     const lines = [];
-    if (this.tent) {
-      if (this.tent.state === 'packed') lines.push(this.tent.placeLabel);
-      else if (this.tent.nearPlaced(this.player)) {
-        lines.push(this.tent.packLabel);
-        if (this.tentPower && !this.tentPower.cabling && !(this.solar && this.solar.cabling) && !(this.turbine && this.turbine.cabling)) {
-          lines.push(this.tentPower.connected ? 'Unplug tent cable' : 'Run tent cable');
-        }
-      }
-    }
-    if (this.fire) {
-      if (this.fire.packed) lines.push('Campfire');
-      else if (this.fire.near(this.player)) {
-        lines.push(this.fire.lit ? 'Put out fire' : 'Light fire');
-        lines.push('Pack campfire');
-      }
-    }
-    if (this.solar) {
-      if (this.solar.packed) lines.push('Solar panel');
-      else if (this.solar.near(this.player) && !this.solar.cabling) {
-        lines.push(this.solar.connected ? 'Unplug cable' : 'Run cable');
-        lines.push('Pack solar panel');
-      }
-    }
-    if (this.turbine) {
-      if (this.turbine.packed) lines.push('Wind turbine');
-      else if (this.turbine.near(this.player) && !this.turbine.cabling) {
-        const busy = (this.solar && this.solar.cabling) || (this.tentPower && this.tentPower.cabling) || (this.lamp && this.lamp.charging);
-        if (!busy) {
-          if (this.turbine.connected) lines.push('Unplug turbine');
-          else {
-            if (this.turbine.planeInReach()) lines.push('Run cable to plane');
-            if (this.turbine.tentInReach()) lines.push('Run cable to tent');
-          }
-        }
-        lines.push('Pack wind turbine');
-      }
-    }
-    if (this.lamp && this.lamp.canCharge() && !(this.solar && this.solar.cabling) && !(this.tentPower && this.tentPower.cabling) && !(this.turbine && this.turbine.cabling)) {
-      lines.push('Charge lamp');
+    if (this.lamp && this.lamp.charge < 99.5 && this.lamp.source !== 'seek' && !(this.solar && this.solar.cabling) && !(this.tentPower && this.tentPower.cabling) && !(this.turbine && this.turbine.cabling)) {
+      lines.push('Attach wire');
     }
     return lines;
+  }
+
+  spotDist(mesh) {
+    const spot = mesh && mesh.position ? mesh.position : mesh;
+    if (!spot || !this.player) return 999;
+    return Math.hypot(this.player.position.x - spot.x, this.player.position.z - spot.z);
+  }
+
+  closestGear(includePlane) {
+    const items = [];
+    if (this.rod && this.rod.near(this.player)) items.push({ kind: 'rod', d: this.spotDist(this.rod.placeable.placed) });
+    if (this.barrel && this.barrel.near(this.player)) items.push({ kind: 'barrel', d: this.spotDist(this.barrel.placeable.placed) });
+    if (this.fire && this.fire.near(this.player)) items.push({ kind: 'fire', d: this.spotDist(this.fire.placeable.placed) });
+    if (this.solar && this.solar.near(this.player)) items.push({ kind: 'solar', d: this.spotDist(this.solar.spot()) });
+    if (this.turbine && this.turbine.near(this.player)) items.push({ kind: 'turbine', d: this.spotDist(this.turbine.spot()) });
+    if (this.tent && this.tent.state === 'placed' && this.tent.nearPlaced(this.player)) items.push({ kind: 'tent', d: this.spotDist(this.tent.placed) });
+    if (this.batteries) {
+      for (let i = 0; i < this.batteries.length; i++) {
+        const cell = this.batteries[i];
+        if (!cell.near(this.player) || !cell.placeable.placed) continue;
+        items.push({ kind: 'battery', d: this.spotDist(cell.placeable.placed), cell });
+      }
+    }
+    if (includePlane && this.aircraft && !this.aircraft.airborne && this.aircraft.speed < 0.8) {
+      const planeD = this.player.position.distanceTo(this.aircraft.position);
+      if (planeD < 4.5) items.push({ kind: 'plane', d: planeD });
+    }
+    items.sort((a, b) => a.d - b.d);
+    return items[0] || null;
+  }
+
+  gearWired(here) {
+    if (!here) return false;
+    if (here.kind === 'solar') return !!(this.solar && this.solar.connected);
+    if (here.kind === 'turbine') return !!(this.turbine && this.turbine.connected);
+    if (here.kind === 'tent') {
+      if (this.tentPower && this.tentPower.connected) return true;
+      return !!(this.turbine && this.turbine.connected && this.turbine.target === 'tent');
+    }
+    if (here.kind === 'battery' && here.cell) {
+      const cell = here.cell;
+      if (this.solar && this.solar.connected && this.solar.battery === cell) return true;
+      if (this.turbine && this.turbine.connected && this.turbine.battery === cell) return true;
+      if (this.tentPower && this.tentPower.connected && this.tentPower.battery === cell) return true;
+      if (this.lamp && this.lamp.charging && this.lamp.source === 'battery' && this.lamp.battery === cell) return true;
+    }
+    return false;
+  }
+
+  gearPrompt(here) {
+    const pack = this.gearWired(here) ? 'Press [F] to unplug.' : 'Press [F] to pack.';
+    if (here.kind === 'rod') {
+      if (this.rod.caught && this.heldFish) return 'A fish is in the net. Your hand is full. Press [F] to pack the rod.';
+      return this.rod.caught
+        ? 'A fish is in the net. Press [E] to take it. Press [F] to pack the rod.'
+        : 'The line is in the water. Press [F] to pack the rod.';
+    }
+    if (here.kind === 'barrel') {
+      const level = Math.round(this.barrel.water);
+      return level >= 20
+        ? `Barrel ${level}. Press [E] to drink. ${pack}`
+        : `Barrel ${level}. It fills when it rains. ${pack}`;
+    }
+    if (here.kind === 'fire') {
+      if (this.heldFish && this.fire.lit) return `Click to cook and eat the fish. Press [E] to put the fire out. ${pack}`;
+      if (this.heldFish) return `The fire is out. Click drops the fish. Press [E] to light it. ${pack}`;
+      return this.fire.lit
+        ? `Press [E] to put the fire out. ${pack}`
+        : `Press [E] to light the fire. ${pack}`;
+    }
+    if (here.kind === 'solar') {
+      const spot = this.solar.spot();
+      const sun = spot ? `${this.field.sunLabel(spot.x, spot.z)}. ` : '';
+      return this.solar.connected ? `${sun}${pack}` : `Press [E] to attach a wire. ${pack}`;
+    }
+    if (here.kind === 'turbine') {
+      const calm = this.weather && this.weather.calm;
+      const spot = this.turbine.spot();
+      const label = calm ? 'The air is still' : (spot ? this.field.windLabel(spot.x, spot.z) : 'Wind');
+      return this.turbine.connected ? `${label}. ${pack}` : `${label}. Press [E] to attach a wire. ${pack}`;
+    }
+    if (here.kind === 'tent') {
+      const hungry = this.field.hunger < 99.5;
+      const power = this.tentPower;
+      const open = power && !power.connected;
+      const use = hungry ? 'Press [E] to eat.' : (open ? 'Press [E] to attach a wire.' : '');
+      const cell = power && power.supply === 'battery' ? ' The battery is running the light.' : '';
+      return `${use} ${pack}${cell}`.trim();
+    }
+    if (here.kind === 'battery') {
+      return `Battery ${Math.round(here.cell.charge)}. Press [E] to attach a wire. ${pack}`;
+    }
+    if (here.kind === 'plane') return 'Press [E] to enter the aircraft';
+    return '';
+  }
+
+  useHere() {
+    if (this.wire) {
+      this.clearWire();
+      return;
+    }
+    const here = this.closestGear(true);
+    const lying = this.nearestCatch();
+    if (lying && !this.heldFish && (!here || lying.d < here.d)) {
+      this.pickupFish(lying.item);
+      return;
+    }
+    if (!here) return;
+    this.wireNote = '';
+    if (here.kind === 'rod' && this.rod.caught && !this.heldFish && this.rod.takeFish()) {
+      this.heldFish = true;
+      this.fishCarry.visible = true;
+      this.audio.click();
+      return;
+    }
+    if (here.kind === 'barrel' && this.barrel.takeDrink()) {
+      this.field.drink();
+      this.audio.pour();
+      return;
+    }
+    if (here.kind === 'fire') {
+      this.fire.setLit(!this.fire.lit);
+      this.audio.click();
+      return;
+    }
+    if (here.kind === 'solar' && !this.solar.connected && this.solar.startCable()) {
+      this.wire = { from: 'solar' };
+      return;
+    }
+    if (here.kind === 'turbine' && !this.turbine.connected && this.turbine.startCable()) {
+      this.wire = { from: 'turbine' };
+      return;
+    }
+    if (here.kind === 'battery') {
+      this.wire = { from: 'battery', cell: here.cell };
+      return;
+    }
+    if (here.kind === 'tent' && this.tentPower) {
+      if (this.field.hunger < 99.5) {
+        this.field.eat();
+        this.audio.click();
+        return;
+      }
+      if (!this.tentPower.connected && this.tentPower.startCable()) this.wire = { from: 'tent' };
+      return;
+    }
+    if (here.kind === 'plane') {
+      this.audio.click();
+      this.mode = 'IN_AIRCRAFT';
+      this.planeLookYaw = 0;
+      this.planeLookPitch = 0;
+      this.planeLookIdle = 1;
+      this.player.setActive(false);
+      this.aircraft.airborne = false;
+      this.buildOpen = false;
+    }
+  }
+
+  cookFish() {
+    if (!this.heldFish) return;
+    this.heldFish = false;
+    this.fishCarry.visible = false;
+    this.field.eatFish();
+    this.audio.click();
+  }
+
+  dropFish() {
+    if (!this.heldFish) return;
+    this.heldFish = false;
+    this.fishCarry.visible = false;
+    const yaw = this.player.mesh.rotation.y;
+    const x = this.player.position.x + Math.sin(yaw) * 0.7;
+    const z = this.player.position.z + Math.cos(yaw) * 0.7;
+    const mesh = new THREE.Mesh(
+      this.fishShape,
+      new THREE.MeshStandardMaterial({ color: 0xc47a45, roughness: 0.7 })
+    );
+    mesh.scale.set(1.6, 0.5, 0.7);
+    mesh.position.set(x, this.terrain.getHeightAt(x, z) + 0.05, z);
+    mesh.rotation.y = yaw;
+    mesh.castShadow = true;
+    this.scene.add(mesh);
+    this.groundFish.push({ mesh, life: FISH_ROT });
+  }
+
+  nearestCatch() {
+    if (!this.groundFish || !this.player) return null;
+    let best = null;
+    let bestD = FISH_PICK;
+    for (let i = 0; i < this.groundFish.length; i++) {
+      const item = this.groundFish[i];
+      const d = Math.hypot(this.player.position.x - item.mesh.position.x, this.player.position.z - item.mesh.position.z);
+      if (d <= bestD) {
+        best = { item, d };
+        bestD = d;
+      }
+    }
+    return best;
+  }
+
+  pickupFish(item) {
+    const index = this.groundFish.indexOf(item);
+    if (index < 0 || this.heldFish) return;
+    this.groundFish.splice(index, 1);
+    this.scene.remove(item.mesh);
+    item.mesh.material.dispose();
+    this.heldFish = true;
+    this.fishCarry.visible = true;
+    this.audio.click();
+  }
+
+  ageFish(delta) {
+    if (!this.groundFish) return;
+    for (let i = this.groundFish.length - 1; i >= 0; i--) {
+      const item = this.groundFish[i];
+      item.life -= delta;
+      const fresh = Math.max(0, item.life / FISH_ROT);
+      item.mesh.material.color.setRGB(0.35 + fresh * 0.42, 0.22 + fresh * 0.26, 0.12 + fresh * 0.15);
+      if (item.life > 0) continue;
+      this.scene.remove(item.mesh);
+      item.mesh.material.dispose();
+      this.groundFish.splice(i, 1);
+    }
+  }
+
+  packHere() {
+    const here = this.closestGear(false);
+    if (!here || here.kind === 'plane') return;
+    if (this.releaseWires(here)) {
+      this.audio.click();
+      return;
+    }
+    this.stowGear(here);
+  }
+
+  releaseWires(here) {
+    let cut = false;
+    if (here.kind === 'solar' && this.solar && this.solar.connected) {
+      this.solar.unplug();
+      cut = true;
+    }
+    if (here.kind === 'turbine' && this.turbine && this.turbine.connected) {
+      this.turbine.unplug();
+      cut = true;
+    }
+    if (here.kind === 'tent') {
+      if (this.tentPower && this.tentPower.connected) {
+        this.tentPower.unplug();
+        cut = true;
+      }
+      if (this.turbine && this.turbine.connected && this.turbine.target === 'tent') {
+        this.turbine.unplug();
+        cut = true;
+      }
+    }
+    if (here.kind === 'battery' && here.cell) {
+      const cell = here.cell;
+      if (this.solar && this.solar.connected && this.solar.battery === cell) {
+        this.solar.unplug();
+        cut = true;
+      }
+      if (this.turbine && this.turbine.connected && this.turbine.battery === cell) {
+        this.turbine.unplug();
+        cut = true;
+      }
+      if (this.tentPower && this.tentPower.connected && this.tentPower.battery === cell) {
+        this.tentPower.unplug();
+        cut = true;
+      }
+      if (this.lamp && this.lamp.charging && this.lamp.battery === cell) {
+        this.lamp.stopCharge();
+        cut = true;
+      }
+    }
+    if (cut && this.wire && (this.wire.from === here.kind || (here.cell && this.wire.cell === here.cell))) this.clearWire();
+    return cut;
+  }
+
+  stowGear(here) {
+    if (this.wire && (this.wire.from === here.kind || (here.cell && this.wire.cell === here.cell))) this.clearWire();
+    if (here.kind === 'tent' && this.tent) {
+      this.tent.pack();
+      this.keepGear('tent');
+      if (this.tentPower) this.tentPower.drop();
+      if (this.turbine) this.turbine.dropIfTent();
+    } else if (here.kind === 'fire' && this.fire) {
+      this.fire.pack();
+      this.keepGear('fire');
+    } else if (here.kind === 'solar' && this.solar) {
+      this.solar.pack();
+      this.keepGear('solar');
+    } else if (here.kind === 'turbine' && this.turbine) {
+      this.turbine.pack();
+      this.keepGear('turbine');
+    } else if (here.kind === 'barrel' && this.barrel) {
+      this.barrel.pack();
+      this.keepGear('barrel');
+    } else if (here.kind === 'rod' && this.rod) {
+      this.rod.pack();
+      this.keepGear('rod');
+    } else if (here.kind === 'battery' && here.cell) {
+      here.cell.pack();
+      this.keepGear('battery');
+    } else {
+      return;
+    }
+    this.audio.click();
+  }
+
+  clearWire() {
+    this.wire = null;
+    this.wireNote = '';
+    if (this.solar && this.solar.cabling) this.solar.cancelCable();
+    if (this.turbine && this.turbine.cabling) this.turbine.cancelCable();
+    if (this.tentPower && this.tentPower.cabling) this.tentPower.cancelCable();
+    if (this.lamp && this.lamp.source === 'seek') this.lamp.stopCharge();
+    if (this.wireLead) this.wireLead.visible = false;
+  }
+
+  closestEnd() {
+    const p = this.player.position;
+    const reach = 3.5;
+    const ends = [];
+    const from = this.wire && this.wire.from;
+    if (this.aircraft && !this.aircraft.airborne && this.aircraft.speed < 0.8) {
+      const d = p.distanceTo(this.aircraft.position);
+      if (d <= reach && from !== 'plane') ends.push({ kind: 'plane', d });
+    }
+    const cell = this.batteries ? this.batteries.find((item) => item.placed && item.placeable.placed && p.distanceTo(item.placeable.placed.position) <= reach) : null;
+    if (cell && !(from === 'battery' && this.wire.cell === cell)) {
+      ends.push({ kind: 'battery', cell, d: p.distanceTo(cell.placeable.placed.position) });
+    }
+    if (this.solar && !this.solar.packed && this.solar.near(this.player) && from !== 'solar') {
+      const spot = this.solar.spot();
+      ends.push({ kind: 'solar', d: Math.hypot(p.x - spot.x, p.z - spot.z) });
+    }
+    if (this.turbine && !this.turbine.packed && this.turbine.near(this.player) && from !== 'turbine') {
+      const spot = this.turbine.spot();
+      ends.push({ kind: 'turbine', d: Math.hypot(p.x - spot.x, p.z - spot.z) });
+    }
+    if (this.tent && this.tent.state === 'placed' && this.tent.nearPlaced(this.player) && from !== 'tent') {
+      const spot = this.tent.placed.position;
+      ends.push({ kind: 'tent', d: Math.hypot(p.x - spot.x, p.z - spot.z) });
+    }
+    ends.sort((a, b) => a.d - b.d);
+    return ends[0] || null;
+  }
+
+  joinWire(end) {
+    const from = this.wire.from;
+    const kind = end.kind;
+    const pair = from < kind ? `${from}-${kind}` : `${kind}-${from}`;
+    const cell = from === 'battery' ? this.wire.cell : end.cell;
+    if (pair === 'battery-solar' && this.solar && !this.solar.packed && this.solar.lead !== 'connected') {
+      this.solar.target = 'battery';
+      this.solar.battery = cell;
+      this.solar.lead = 'connected';
+      return true;
+    }
+    if (pair === 'plane-solar' && this.solar && !this.solar.packed && this.solar.lead !== 'connected') {
+      this.solar.target = 'plane';
+      this.solar.battery = null;
+      this.solar.lead = 'connected';
+      return true;
+    }
+    if (pair === 'battery-turbine' && this.turbine && !this.turbine.packed && this.turbine.lead !== 'connected') {
+      this.turbine.target = 'battery';
+      this.turbine.battery = cell;
+      this.turbine.lead = 'connected';
+      return true;
+    }
+    if (pair === 'plane-turbine' && this.turbine && !this.turbine.packed && this.turbine.lead !== 'connected') {
+      this.turbine.target = 'plane';
+      this.turbine.battery = null;
+      this.turbine.lead = 'connected';
+      return true;
+    }
+    if (pair === 'tent-turbine' && this.turbine && !this.turbine.packed && this.turbine.lead !== 'connected' && this.tent && this.tent.state === 'placed') {
+      this.turbine.target = 'tent';
+      this.turbine.battery = null;
+      this.turbine.lead = 'connected';
+      return true;
+    }
+    if (pair === 'battery-tent' && this.tentPower && this.tent && this.tent.state === 'placed' && this.tentPower.lead !== 'connected') {
+      this.tentPower.target = 'battery';
+      this.tentPower.battery = cell;
+      this.tentPower.lead = 'connected';
+      return true;
+    }
+    if (pair === 'plane-tent' && this.tentPower && this.tent && this.tent.state === 'placed' && this.tentPower.lead !== 'connected') {
+      this.tentPower.target = 'plane';
+      this.tentPower.battery = null;
+      this.tentPower.lead = 'connected';
+      return true;
+    }
+    if (pair === 'battery-lamp' && this.lamp && cell && cell.charge > 0 && this.lamp.charge < 99.5 && this.lamp.source === 'seek') {
+      this.lamp.battery = cell;
+      this.lamp.source = 'battery';
+      this.lamp.charging = true;
+      this.lamp.lit = false;
+      return true;
+    }
+    if (pair === 'lamp-plane' && this.lamp && this.lamp.canChargePlane() && this.lamp.source === 'seek') {
+      this.lamp.source = 'plane';
+      this.lamp.charging = true;
+      this.lamp.lit = false;
+      return true;
+    }
+    return false;
+  }
+
+  landWire() {
+    const end = this.closestEnd();
+    if (!end || !this.joinWire(end)) {
+      if (end || (this.fire && this.fire.near(this.player)) || (this.barrel && this.barrel.near(this.player)) || (this.rod && this.rod.near(this.player))) {
+        this.wireNote = "That doesn't take this cable.";
+      }
+      return;
+    }
+    if (this.lamp && this.lamp.source === 'seek') this.lamp.stopCharge();
+    this.wire = null;
+    this.wireNote = '';
+    this.audio.click();
+  }
+
+  drawLooseWire() {
+    if (!this.wireLead) return;
+    if (!this.wire || this.wire.from !== 'battery' || !this.wire.cell || !this.wire.cell.placed || !this.player) {
+      this.wireLead.visible = false;
+      return;
+    }
+    const yaw = this.player.mesh.rotation.y;
+    this._wireTo.set(
+      this.player.position.x + Math.sin(yaw) * 0.7,
+      this.player.position.y + 0.95,
+      this.player.position.z + Math.cos(yaw) * 0.7
+    );
+    this.wire.cell.socket(this._wireFrom);
+    this._wireMid.lerpVectors(this._wireFrom, this._wireTo, 0.5);
+    const dist = this._wireFrom.distanceTo(this._wireTo);
+    this._wireMid.y -= Math.min(0.85, Math.max(0.12, dist * 0.08));
+    const curve = new THREE.CatmullRomCurve3([this._wireFrom, this._wireMid, this._wireTo]);
+    const next = new THREE.TubeGeometry(curve, 12, 0.018, 5, false);
+    this.wireLead.geometry.dispose();
+    this.wireLead.geometry = next;
+    this.wireLead.visible = true;
+  }
+
+  gearIcon(id) {
+    const paths = {
+      tent: '<path d="M6 28 L18 6 L30 28 Z" fill="none" stroke="currentColor" stroke-width="2"/>',
+      fire: '<path d="M18 30c6 0 8-5 6-10-3 2-4 2-5-2 0 0-7 4-7 12 0 4 2 6 6 6z" fill="currentColor"/>',
+      solar: '<rect x="6" y="10" width="24" height="14" rx="1" fill="none" stroke="currentColor" stroke-width="2"/><path d="M6 17h24M14 10v14M22 10v14" stroke="currentColor"/>',
+      turbine: '<path d="M18 30V14M18 14l-8 4M18 14l8 4M18 14V6" fill="none" stroke="currentColor" stroke-width="2"/>',
+      barrel: '<path d="M12 8h12v20H12z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 16h12" stroke="currentColor"/>',
+      rod: '<path d="M8 28 L26 8" stroke="currentColor" stroke-width="2"/><circle cx="27" cy="8" r="2" fill="currentColor"/>',
+      battery: '<rect x="8" y="12" width="20" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M14 12V8M22 12V8" stroke="currentColor" stroke-width="2"/>'
+    };
+    return `<svg viewBox="0 0 36 36" aria-hidden="true">${paths[id] || ''}</svg>`;
+  }
+
+  gearSlots() {
+    const rows = [
+      ['tent', 'Tent', this.tent && this.tent.state === 'packed'],
+      ['fire', 'Fire', this.fire && this.fire.packed],
+      ['solar', 'Solar', this.solar && this.solar.packed],
+      ['turbine', 'Turbine', this.turbine && this.turbine.packed],
+      ['barrel', 'Barrel', this.barrel && this.barrel.packed],
+      ['rod', 'Rod', this.rod && this.rod.packed],
+      ['battery', 'Battery', true]
+    ];
+    const slots = [];
+    for (let i = 0; i < rows.length; i++) {
+      const count = this.carried ? this.carried[rows[i][0]] : 0;
+      if (count > 0 && rows[i][2]) slots.push({ id: rows[i][0], label: rows[i][1], count });
+    }
+    return slots;
+  }
+
+  bagSize() {
+    return this.gearSlots().length + this.campLines().length;
+  }
+
+  placingBattery() {
+    if (!this.batteries) return null;
+    for (let i = 0; i < this.batteries.length; i++) {
+      if (this.batteries[i].placing) return this.batteries[i];
+    }
+    return null;
+  }
+
+  batteryNear() {
+    if (!this.batteries || !this.player) return null;
+    for (let i = 0; i < this.batteries.length; i++) {
+      if (this.batteries[i].near(this.player)) return this.batteries[i];
+    }
+    return null;
+  }
+
+  placeFromBag(id) {
+    if (!this.carried || this.carried[id] <= 0) return false;
+    if (id === 'battery') {
+      let cell = null;
+      for (let i = 0; i < this.batteries.length; i++) {
+        if (this.batteries[i].packed) cell = this.batteries[i];
+      }
+      if (!cell) {
+        cell = new CarBattery(this.scene, this.terrain);
+        this.batteries.push(cell);
+      }
+      cell.startPlacing(this.player);
+      return true;
+    }
+    const gear = { tent: this.tent, fire: this.fire, solar: this.solar, turbine: this.turbine, barrel: this.barrel, rod: this.rod };
+    const piece = gear[id];
+    if (!piece || !piece.startPlacing) return false;
+    piece.startPlacing(this.player);
+    return true;
+  }
+
+  spendGear(id) {
+    if (this.carried && this.carried[id] > 0) this.carried[id] -= 1;
+  }
+
+  keepGear(id) {
+    if (!this.carried) return;
+    this.carried[id] += 1;
+  }
+
+  paintBag() {
+    if (!this.uiBag) return;
+    if (!this.buildOpen || this.mode !== 'ON_FOOT') {
+      this.uiBag.innerHTML = '';
+      return;
+    }
+    const slots = this.gearSlots();
+    const lines = this.campLines();
+    if (!slots.length && !lines.length) {
+      this.uiBag.innerHTML = '';
+      return;
+    }
+    const icons = slots.map((slot, i) => (
+      `<div class="slot${i === this.buildIndex ? ' on' : ''}">${this.gearIcon(slot.id)}<span>${slot.label}</span><b>${slot.count}</b></div>`
+    )).join('');
+    const acts = lines.map((line, i) => (
+      `<div class="act${slots.length + i === this.buildIndex ? ' on' : ''}">${line}</div>`
+    )).join('');
+    this.uiBag.innerHTML = `<div class="bag-row">${icons}</div><div class="bag-row">${acts}</div>`;
+  }
+
+  activePlaceable() {
+    if (this.tent && this.tent.placing) return this.tent;
+    if (this.fire && this.fire.placing) return this.fire;
+    if (this.solar && this.solar.placing) return this.solar;
+    if (this.turbine && this.turbine.placing) return this.turbine;
+    if (this.barrel && this.barrel.placing) return this.barrel;
+    if (this.rod && this.rod.placing) return this.rod;
+    if (this.placingBattery()) return this.placingBattery();
+    return null;
   }
 
   onMiddleClick() {
@@ -895,8 +1460,24 @@ class Game {
       this.buildOpen = false;
       return;
     }
-    if (this.solar && this.solar.cabling) {
-      this.solar.cancelCable();
+    if (this.barrel && this.barrel.placing) {
+      this.barrel.cancel();
+      this.buildOpen = false;
+      return;
+    }
+    if (this.rod && this.rod.placing) {
+      this.rod.cancel();
+      this.buildOpen = false;
+      return;
+    }
+    const placingCell = this.placingBattery();
+    if (placingCell) {
+      placingCell.cancel();
+      this.buildOpen = false;
+      return;
+    }
+    if (this.wire || (this.solar && this.solar.cabling)) {
+      this.clearWire();
       this.buildOpen = false;
       return;
     }
@@ -919,7 +1500,7 @@ class Game {
       this.buildOpen = false;
       return;
     }
-    if (this.campLines().length) {
+    if (this.bagSize()) {
       this.buildIndex = 0;
       this.buildOpen = true;
     }
@@ -928,48 +1509,83 @@ class Game {
   onLeftClick() {
     if (this.mode !== 'ON_FOOT') return;
     if (this.tent && this.tent.placing) {
-      if (this.tent.confirm()) this.audio.click();
+      if (this.tent.confirm()) {
+        this.spendGear('tent');
+        this.audio.click();
+      }
       return;
     }
     if (this.fire && this.fire.placing) {
-      if (this.fire.confirm()) this.audio.click();
+      if (this.fire.confirm()) {
+        this.spendGear('fire');
+        this.audio.click();
+      }
       return;
     }
     if (this.solar && this.solar.placing) {
-      if (this.solar.confirm()) this.audio.click();
+      if (this.solar.confirm()) {
+        this.spendGear('solar');
+        this.audio.click();
+      }
       return;
     }
     if (this.turbine && this.turbine.placing) {
-      if (this.turbine.confirm()) this.audio.click();
+      if (this.turbine.confirm()) {
+        this.spendGear('turbine');
+        this.audio.click();
+      }
       return;
     }
-    if (this.solar && this.solar.cabling) {
-      if (this.solar.tryPlug(this.player)) this.audio.click();
+    if (this.barrel && this.barrel.placing) {
+      if (this.barrel.confirm()) {
+        this.spendGear('barrel');
+        this.audio.click();
+      }
       return;
     }
-    if (this.turbine && this.turbine.cabling) {
-      if (this.turbine.tryPlug(this.player)) this.audio.click();
+    if (this.rod && this.rod.placing) {
+      if (this.rod.confirm()) {
+        this.spendGear('rod');
+        this.audio.click();
+      }
       return;
     }
-    if (this.tentPower && this.tentPower.cabling) {
-      if (this.tentPower.tryPlug(this.player)) this.audio.click();
+    const placingCell = this.placingBattery();
+    if (placingCell) {
+      if (placingCell.confirm()) {
+        this.spendGear('battery');
+        this.audio.click();
+      }
+      return;
+    }
+    if (this.wire) {
+      this.landWire();
+      return;
+    }
+    if (this.heldFish && !this.buildOpen) {
+      if (this.fire && this.fire.lit && this.fire.near(this.player)) this.cookFish();
+      else this.dropFish();
       return;
     }
     if (!this.buildOpen) return;
+    const slots = this.gearSlots();
+    if (this.buildIndex < slots.length) {
+      if (this.placeFromBag(slots[this.buildIndex].id)) {
+        this.buildOpen = false;
+        this.audio.click();
+      }
+      return;
+    }
     const lines = this.campLines();
-    const line = lines[this.buildIndex];
+    const line = lines[this.buildIndex - slots.length];
     if (line === 'Tent' && this.tent) {
       this.tent.startPlacing(this.player);
     } else if (line === 'Pack tent' && this.tent) {
       this.tent.pack();
+      this.keepGear('tent');
       if (this.tentPower) this.tentPower.drop();
       if (this.turbine) this.turbine.dropIfTent();
-    } else if (line === 'Run tent cable' && this.tentPower) {
-      if (this.solar && this.solar.cabling) return;
-      if (this.turbine && this.turbine.cabling) return;
-      if (this.lamp && this.lamp.charging) return;
-      if (!this.tentPower.startCable()) return;
-    } else if (line === 'Unplug tent cable' && this.tentPower) {
+    } else if (line === 'Unplug tent' && this.tentPower && this.tentPower.connected && this.tent && this.tent.nearPlaced(this.player)) {
       this.tentPower.unplug();
     } else if (line === 'Campfire' && this.fire) {
       this.fire.startPlacing(this.player);
@@ -979,38 +1595,43 @@ class Game {
       this.fire.setLit(false);
     } else if (line === 'Pack campfire' && this.fire) {
       this.fire.pack();
+      this.keepGear('fire');
     } else if (line === 'Solar panel' && this.solar) {
       this.solar.startPlacing(this.player);
-    } else if (line === 'Run cable' && this.solar) {
-      if (this.tentPower && this.tentPower.cabling) return;
-      if (this.turbine && this.turbine.cabling) return;
-      if (this.lamp && this.lamp.charging) return;
-      this.solar.startCable();
-    } else if (line === 'Unplug cable' && this.solar) {
+    } else if (line === 'Unplug panel' && this.solar && this.solar.connected && this.solar.near(this.player)) {
       this.solar.unplug();
     } else if (line === 'Pack solar panel' && this.solar) {
       this.solar.pack();
+      this.keepGear('solar');
     } else if (line === 'Wind turbine' && this.turbine) {
       this.turbine.startPlacing(this.player);
-    } else if (line === 'Run cable to plane' && this.turbine) {
-      if (this.solar && this.solar.cabling) return;
-      if (this.tentPower && this.tentPower.cabling) return;
-      if (this.lamp && this.lamp.charging) return;
-      if (!this.turbine.startCable('plane')) return;
-    } else if (line === 'Run cable to tent' && this.turbine) {
-      if (this.solar && this.solar.cabling) return;
-      if (this.tentPower && this.tentPower.cabling) return;
-      if (this.lamp && this.lamp.charging) return;
-      if (!this.turbine.startCable('tent')) return;
-    } else if (line === 'Unplug turbine' && this.turbine) {
+    } else if (line === 'Unplug turbine' && this.turbine && this.turbine.connected && this.turbine.near(this.player)) {
       this.turbine.unplug();
     } else if (line === 'Pack wind turbine' && this.turbine) {
       this.turbine.pack();
-    } else if (line === 'Charge lamp' && this.lamp) {
-      if (this.solar && this.solar.cabling) return;
-      if (this.tentPower && this.tentPower.cabling) return;
-      if (this.turbine && this.turbine.cabling) return;
-      if (!this.lamp.startCharge()) return;
+      this.keepGear('turbine');
+    } else if (line === 'Water barrel' && this.barrel) {
+      this.barrel.startPlacing(this.player);
+    } else if (line === 'Pack water barrel' && this.barrel) {
+      this.barrel.pack();
+      this.keepGear('barrel');
+    } else if (line === 'Fishing rod' && this.rod) {
+      this.rod.startPlacing(this.player);
+    } else if (line === 'Pack fishing rod' && this.rod) {
+      this.rod.pack();
+      this.keepGear('rod');
+    } else if (line === 'Pack car battery') {
+      const cell = this.batteryNear();
+      if (!cell) return;
+      if (this.solar && this.solar.battery === cell) this.solar.unplug();
+      if (this.turbine && this.turbine.battery === cell) this.turbine.unplug();
+      if (this.tentPower && this.tentPower.battery === cell) this.tentPower.drop();
+      if (this.lamp && this.lamp.battery === cell) this.lamp.stopCharge();
+      cell.pack();
+      this.keepGear('battery');
+    } else if (line === 'Attach wire' && this.lamp) {
+      if (!this.lamp.startCharge('seek')) return;
+      this.wire = { from: 'lamp' };
     } else {
       return;
     }

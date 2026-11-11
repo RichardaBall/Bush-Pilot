@@ -58,6 +58,20 @@ export class Soundscape {
     this.windGain.connect(this.master);
     wind.start();
 
+    const rain = ctx.createBufferSource();
+    rain.buffer = noise;
+    rain.loop = true;
+    const rainFilter = ctx.createBiquadFilter();
+    rainFilter.type = 'lowpass';
+    rainFilter.frequency.value = 900;
+    rainFilter.Q.value = 0.4;
+    this.rainGain = ctx.createGain();
+    this.rainGain.gain.value = 0;
+    rain.connect(rainFilter);
+    rainFilter.connect(this.rainGain);
+    this.rainGain.connect(this.master);
+    rain.start();
+
     this.propFilter = ctx.createBiquadFilter();
     this.propFilter.type = 'lowpass';
     this.propFilter.frequency.value = 2200;
@@ -99,6 +113,12 @@ export class Soundscape {
     if (!this.ready) return;
     const level = Math.max(0, Math.min(1, amount)) * 0.05;
     this.windGain.gain.setTargetAtTime(level, this.ctx.currentTime, 0.45);
+  }
+
+  rain(amount) {
+    if (!this.ready || !this.rainGain) return;
+    const level = Math.max(0, Math.min(1, amount)) * 0.07;
+    this.rainGain.gain.setTargetAtTime(level, this.ctx.currentTime, 0.4);
   }
 
   prop(power, speed, airborne) {
